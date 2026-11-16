@@ -6,6 +6,10 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PatchTrackerTest {
+    private var frameNumber = 0L
+    private fun nextFrame() = (++frameNumber) * 33_000_000L
+    private fun PatchTracker.select(y: Luma, c: Crop, p: Point) = select(y, c, p, nextFrame())
+    private fun PatchTracker.follow(y: Luma, c: Crop) = follow(y, c, nextFrame())
     private val crop = Crop(6, 4, 92, 86)
     private val noise = IntArray(96 * 90).also { data ->
         val random = Random(582)
@@ -126,7 +130,7 @@ class PatchTrackerTest {
         assertEquals(PatchFailure.AMBIGUOUS, tracker.failure)
     }
 
-    @Test fun occlusionClearsTrackUntilNewTapInsteadOfReusingLastPoint() {
+    @Test fun occlusionAndOneClearFrameDoNotRedisplayTheLastPoint() {
         val tracker = PatchTracker()
         assertNotNull(tracker.select(shifted(), crop, Point(42f, 42f)))
         assertNull(tracker.follow(image { _, _ -> 63 }, crop))
@@ -136,5 +140,61 @@ class PatchTrackerTest {
         assertNotNull(tracker.select(shifted(), crop, Point(42f, 42f)))
         assertNull(tracker.failure)
         assertEquals(1, tracker.matchedFrames)
+    }
+
+    @Test fun oneBlurredFrameHidesImmediatelyAndTwoClearFramesConfirmTheNewPosition() {
+        val tracker = PatchTracker()
+        assertNotNull(tracker.select(shifted(), crop, Point(42.5f, 42.5f)))
+        assertNull(tracker.follow(image { _, _ -> 70 }, crop))
+        assertNull(tracker.follow(shifted(4, 3), crop))
+        assertEquals(Point(47.5f, 46.5f), tracker.follow(shifted(5, 4), crop))
+        assertNull(tracker.failure)
+        assertEquals(2, tracker.matchedFrames)
+    }
+
+    @Test fun aLongGapOrAnExpiredSecondConfirmationRequiresANewTap() {
+        val tracker = PatchTracker()
+        val center = Point(42.5f, 42.5f)
+        val frame = shifted()
+        val blank = image { _, _ -> 70 }
+        assertEquals(center, tracker.select(frame, crop, center, 0))
+        assertNull(tracker.follow(blank, crop, 100_000_000))
+        assertNull(tracker.follow(frame, crop, 225_000_000))
+        assertNull(tracker.follow(frame, crop, 251_000_000))
+        assertEquals(PatchFailure.EXPIRED, tracker.failure)
+        assertNull(tracker.follow(frame, crop, 275_000_000))
+        assertEquals(center, tracker.select(frame, crop, center, 300_000_000))
+        assertNull(tracker.follow(frame, crop, 600_000_000))
+    }
+
+    @Test fun distantOrInconsistentCandidatesCannotRecoverALostPoint() {
+        val tracker = PatchTracker()
+        assertNotNull(tracker.select(shifted(), crop, Point(42.5f, 42.5f)))
+        assertNull(tracker.follow(image { _, _ -> 70 }, crop))
+        for (shift in listOf(13, 13, -5, 5, -5)) assertNull(tracker.follow(shifted(shift), crop))
+        assertEquals(1, tracker.matchedFrames)
+    }
+
+    @Test fun ambiguousReappearanceStopsRecoveryAndCannotJumpToASingleRemainingCopy() {
+        val tracker = PatchTracker()
+        assertNotNull(tracker.select(shifted(), crop, Point(42.5f, 42.5f)))
+        assertNull(tracker.follow(image { _, _ -> 70 }, crop))
+        val copies = image { x, y -> noise[y * 96 + (if (x < 42) x + 12 else x - 12)] }
+        assertNull(tracker.follow(copies, crop))
+        assertEquals(PatchFailure.AMBIGUOUS, tracker.failure)
+        repeat(2) { assertNull(tracker.follow(shifted(4), crop)) }
+    }
+
+    @Test fun invalidRetapDiscardsAPendingConfirmation() {
+        val tracker = PatchTracker()
+        val center = Point(42.5f, 42.5f)
+        val blank = image { _, _ -> 70 }
+        assertNotNull(tracker.select(shifted(), crop, center))
+        assertNull(tracker.follow(blank, crop))
+        assertNull(tracker.follow(shifted(), crop))
+        assertNull(tracker.select(blank, crop, center))
+        repeat(2) { assertNull(tracker.follow(shifted(), crop)) }
+        assertEquals(0, tracker.matchedFrames)
+        assertEquals(PatchFailure.LOW_TEXTURE, tracker.failure)
     }
 }

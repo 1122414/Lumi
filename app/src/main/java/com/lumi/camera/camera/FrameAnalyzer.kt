@@ -10,7 +10,7 @@ internal data class Tap(val id: Long, val screen: Point?)
 internal data class FrameInfo(val timestampNs: Long, val geometry: FrameGeometry)
 internal data class AnalysisResult(
     val frame: FrameInfo, val tapId: Long, val marker: Point?,
-    val failure: PatchFailure?, val matchedFrames: Int,
+    val failure: PatchFailure?, val matchedFrames: Int, val recovering: Boolean,
     val fps: Double, val elapsedMs: Double, val startedAtMs: Long,
 )
 
@@ -47,20 +47,21 @@ internal class FrameAnalyzer(
             val y = Luma(plane.buffer, plane.rowStride, plane.pixelStride)
             val selection = tap.get()
             val freshTap = selection.id != consumedTap
+            val wasRecovering = tracker.isRecovering
             val wasTracking = tracker.matchedFrames > 0 && tracker.failure == null
             val point = if (freshTap) {
                 consumedTap = selection.id
                 val raw = selection.screen?.let(mapping::previewToAnalysis)
                 outside = raw == null
-                if (raw != null) tracker.select(y, geometry.crop, raw) else {
+                if (raw != null) tracker.select(y, geometry.crop, raw, timestamp) else {
                     tracker = PatchTracker()
                     null
                 }
-            } else tracker.follow(y, geometry.crop)
+            } else tracker.follow(y, geometry.crop, timestamp)
 
             val failure = if (outside) PatchFailure.OUTSIDE else tracker.failure
-            if (freshTap || (wasTracking && point == null && failure != null)) {
-                Log.d("LumiMarker", "tap=${selection.id} confirmedFrames=${tracker.matchedFrames} result=${failure ?: "MATCH"}")
+            if (freshTap || wasRecovering != tracker.isRecovering || (wasTracking && point == null && failure != null)) {
+                Log.d("LumiMarker", "tap=${selection.id} confirmedFrames=${tracker.matchedFrames} result=${failure ?: "MATCH"} checking=${tracker.isRecovering}")
             }
 
             if (intervals == 0 && windowStart == 0L) windowStart = timestamp else intervals++
@@ -71,7 +72,7 @@ internal class FrameAnalyzer(
                 intervals = 0
             }
             deliver(AnalysisResult(FrameInfo(timestamp, geometry), selection.id,
-                point?.let(mapping::toPreview), failure, tracker.matchedFrames, fps, (SystemClock.elapsedRealtimeNanos() - start) / 1e6,
+                point?.let(mapping::toPreview), failure, tracker.matchedFrames, tracker.isRecovering, fps, (SystemClock.elapsedRealtimeNanos() - start) / 1e6,
                 start / 1_000_000L))
         } finally {
             image.close()

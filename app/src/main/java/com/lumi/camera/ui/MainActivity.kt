@@ -101,12 +101,14 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
         CameraSession(preview, owner, { result ->
             marker = result?.marker
             trackingHint = result?.failure?.let { failure ->
+                if (result.recovering) return@let "暂时看不清，正在附近核对原图案"
                 val phase = if (result.matchedFrames == 0) "未选中" else "已跟踪 ${result.matchedFrames} 帧后丢失"
                 val reason = when (failure) {
                     PatchFailure.EDGE, PatchFailure.OUTSIDE -> "请点取景区内侧"
                     PatchFailure.LOW_TEXTURE -> "纹理不足，请点清晰的字角"
                     PatchFailure.WEAK_MATCH -> "没有相似的图案，请重新点选"
                     PatchFailure.AMBIGUOUS -> "相似位置过多，请换一个特征"
+                    PatchFailure.EXPIRED -> "未能及时确认原图案，请重新点选"
                 }
                 "$phase：$reason"
             }

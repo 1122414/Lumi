@@ -13,7 +13,7 @@ class Luma(private val bytes: ByteBuffer, private val rowStride: Int, private va
 }
 
 // M1 tap verifier: an isolated, textured patch in the Y plane, not a semantic object tracker.
-enum class PatchFailure { EDGE, OUTSIDE, LOW_TEXTURE, WEAK_MATCH, AMBIGUOUS }
+enum class PatchFailure { EDGE, OUTSIDE, LOW_TEXTURE, WEAK_MATCH, AMBIGUOUS, EXPIRED }
 
 class PatchTracker {
     var failure: PatchFailure? = null
@@ -24,13 +24,18 @@ class PatchTracker {
     private val sample = DoubleArray(COUNT)
     private var cx = 0
     private var cy = 0
-    private var active = false
+    private enum class State { IDLE, TRACKING, CHECKING }
+    private var state = State.IDLE
+    val isRecovering get() = state == State.CHECKING
+    private var lastConfirmedNs = 0L
+    private var candidate: Point? = null
     private val scores = DoubleArray((SEARCH * 2 + 1) * (SEARCH * 2 + 1))
     private val tile = IntArray(MAX_SIDE * MAX_SIDE)
     private val horizontal = IntArray(MAX_SIDE * (MAX_SIDE + 4))
 
-    fun select(y: Luma, c: Crop, p: Point): Point? {
-        active = false
+    fun select(y: Luma, c: Crop, p: Point, timestampNs: Long): Point? {
+        state = State.IDLE
+        candidate = null
         matchedFrames = 0
         failure = null
         cx = p.x.toInt()
@@ -40,7 +45,7 @@ class PatchTracker {
             failure = PatchFailure.EDGE
             return null
         }
-        return match(y, c, selecting = true)
+        return match(y, c, timestampNs, selecting = true)
     }
 
     private fun samplePatch(base: Int, stride: Int): Boolean {
@@ -56,7 +61,15 @@ class PatchTracker {
         return true
     }
 
-    fun follow(y: Luma, c: Crop): Point? = if (active) match(y, c, selecting = false) else null
+    fun follow(y: Luma, c: Crop, timestampNs: Long): Point? {
+        if (state == State.IDLE) return null
+        if (timestampNs - lastConfirmedNs > MAX_GAP_NS) {
+            state = State.IDLE
+            failure = PatchFailure.EXPIRED
+            return null
+        }
+        return match(y, c, timestampNs, selecting = false)
+    }
 
     // Low-pass before sampling every other pixel; both template and candidates use the same filter.
     private fun loadTile(y: Luma, left: Int, top: Int, width: Int, height: Int) {
@@ -75,7 +88,7 @@ class PatchTracker {
         }
     }
 
-    private fun match(y: Luma, c: Crop, selecting: Boolean): Point? {
+    private fun match(y: Luma, c: Crop, timestampNs: Long, selecting: Boolean): Point? {
         val x0 = max(c.left + MARGIN, cx - SEARCH)
         val x1 = min(c.right - 1 - MARGIN, cx + SEARCH)
         val y0 = max(c.top + MARGIN, cy - SEARCH)
@@ -117,11 +130,32 @@ class PatchTracker {
             if (abs(i - bx) > 4 || abs(j - by) > 4) second = max(second, scores[at])
             at++
         }
-        active = best >= 0.82 && best - second >= 0.06
-        if (!active) {
-            failure = if (best < 0.82) PatchFailure.WEAK_MATCH else PatchFailure.AMBIGUOUS
+        val margin = best - second
+        if (best < (if (isRecovering) 0.90 else 0.82)) {
+            failure = PatchFailure.WEAK_MATCH
+            candidate = null
+            state = if (selecting) State.IDLE else State.CHECKING
             return null
         }
+        if (margin < (if (isRecovering) 0.12 else 0.06)) {
+            failure = PatchFailure.AMBIGUOUS
+            state = State.IDLE
+            return null
+        }
+        if (isRecovering) {
+            // Keep the last confirmed template and center frozen until two fresh frames agree.
+            if (abs(bx - cx) > 10 || abs(by - cy) > 10) {
+                candidate = null
+                return null
+            }
+            val prior = candidate
+            candidate = Point(bx.toFloat(), by.toFloat())
+            if (prior == null || abs(bx - prior.x) > 4 || abs(by - prior.y) > 4) return null
+        }
+        state = State.TRACKING
+        candidate = null
+        failure = null
+        lastConfirmedNs = timestampNs
         matchedFrames++
         cx = bx
         cy = by
@@ -150,6 +184,7 @@ class PatchTracker {
         const val RADIUS = 8
         const val COUNT = 81
         const val SEARCH = 18
+        const val MAX_GAP_NS = 250_000_000L
         const val MAX_UPDATE_OFFSET_PX = 0.2
         const val MARGIN = RADIUS + 2
         const val MAX_SIDE = 2 * (SEARCH + RADIUS) + 1
