@@ -13,7 +13,13 @@ class Luma(private val bytes: ByteBuffer, private val rowStride: Int, private va
 }
 
 // M1 tap verifier: an isolated, textured patch in the Y plane, not a semantic object tracker.
+enum class PatchFailure { EDGE, OUTSIDE, LOW_TEXTURE, WEAK_MATCH, AMBIGUOUS }
+
 class PatchTracker {
+    var failure: PatchFailure? = null
+        private set
+    var matchedFrames = 0
+        private set
     private val template = DoubleArray(COUNT)
     private val sample = DoubleArray(COUNT)
     private var cx = 0
@@ -24,11 +30,19 @@ class PatchTracker {
 
     fun select(y: Luma, c: Crop, p: Point): Point? {
         active = false
+        matchedFrames = 0
+        failure = null
         cx = p.x.toInt()
         cy = p.y.toInt()
         if (cx - RADIUS < c.left || cy - RADIUS < c.top ||
-            cx + RADIUS >= c.right || cy + RADIUS >= c.bottom) return null
-        if (!samplePatch(y)) return null
+            cx + RADIUS >= c.right || cy + RADIUS >= c.bottom) {
+            failure = PatchFailure.EDGE
+            return null
+        }
+        if (!samplePatch(y)) {
+            failure = PatchFailure.LOW_TEXTURE
+            return null
+        }
         sample.copyInto(template)
         active = true
         // Reject repetitive texture even on the selection frame.
@@ -88,7 +102,11 @@ class PatchTracker {
             at++
         }
         active = best >= 0.82 && best - second >= 0.06
-        if (!active) return null
+        if (!active) {
+            failure = if (best < 0.82) PatchFailure.WEAK_MATCH else PatchFailure.AMBIGUOUS
+            return null
+        }
+        matchedFrames++
         cx = bx
         cy = by
         // Follow gradual appearance changes only after a strong, isolated match.

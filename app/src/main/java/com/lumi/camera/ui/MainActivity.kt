@@ -27,6 +27,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.camera.view.PreviewView
 import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
+import com.lumi.camera.camera.PatchFailure
 import com.lumi.camera.camera.Point
 import java.util.Locale
 
@@ -91,6 +92,7 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
         }
     }
     var marker by remember { mutableStateOf<Point?>(null) }
+    var trackingHint by remember { mutableStateOf<String?>(null) }
     var stats by remember { mutableStateOf("等待分析帧") }
     var bound by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(false) }
@@ -98,6 +100,16 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
         var nextStatsNs = Long.MIN_VALUE
         CameraSession(preview, owner, { result ->
             marker = result?.marker
+            trackingHint = result?.failure?.let { failure ->
+                val phase = if (result.matchedFrames == 0) "未选中" else "已跟踪 ${result.matchedFrames} 帧后丢失"
+                val reason = when (failure) {
+                    PatchFailure.EDGE, PatchFailure.OUTSIDE -> "请点取景区内侧"
+                    PatchFailure.LOW_TEXTURE -> "纹理不足，请点清晰的字角"
+                    PatchFailure.WEAK_MATCH -> "没有相似的图案，请重新点选"
+                    PatchFailure.AMBIGUOUS -> "相似位置过多，请换一个特征"
+                }
+                "$phase：$reason"
+            }
             if (result != null && result.frame.timestampNs >= nextStatsNs) {
                 val f = result.frame.geometry
                 stats = String.format(Locale.ROOT, "%.1f fps  ·  %.1f ms\n%d × %d  ·  %d°",
@@ -138,7 +150,7 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
     Text(when {
         !bound -> "正在打开后置相机"
         !selected -> "轻点一个有纹理的物体，验证标记位置"
-        marker == null -> "未确认标记，可重新点选"
+        marker == null -> trackingHint ?: "等待确认本次选点"
         else -> "移动手机，观察标记是否贴住原处"
     }, Modifier.padding(top = 8.dp), color = Color.White, fontSize = 13.sp)
     Button(onClick = onShoot, enabled = bound, modifier = Modifier.padding(8.dp)) { Text("拍照并保存") }

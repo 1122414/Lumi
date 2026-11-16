@@ -53,20 +53,28 @@ class PatchTrackerTest {
     @Test fun lowTextureAndEdgeTapsAreRejected() {
         val tracker = PatchTracker()
         assertNull(tracker.select(image { _, _ -> 90 }, crop, Point(42f, 42f)))
+        assertEquals(PatchFailure.LOW_TEXTURE, tracker.failure)
+        assertEquals(0, tracker.matchedFrames)
         assertNull(tracker.select(shifted(), crop, Point(10f, 12f)))
+        assertEquals(PatchFailure.EDGE, tracker.failure)
     }
 
     @Test fun ambiguousRepeatedTextureDoesNotProduceAMarker() {
         val tracker = PatchTracker()
         val periodic = image { x, y -> if ((x / 4 + y / 4) % 2 == 0) 30 else 180 }
         assertNull(tracker.select(periodic, crop, Point(45f, 45f)))
+        assertEquals(PatchFailure.AMBIGUOUS, tracker.failure)
     }
 
     @Test fun occlusionClearsTrackUntilNewTapInsteadOfReusingLastPoint() {
         val tracker = PatchTracker()
         assertNotNull(tracker.select(shifted(), crop, Point(42f, 42f)))
         assertNull(tracker.follow(image { _, _ -> 63 }, crop))
+        assertEquals(PatchFailure.WEAK_MATCH, tracker.failure)
+        assertEquals(1, tracker.matchedFrames)
         assertNull(tracker.follow(shifted(), crop))
         assertNotNull(tracker.select(shifted(), crop, Point(42f, 42f)))
+        assertNull(tracker.failure)
+        assertEquals(1, tracker.matchedFrames)
     }
 }
