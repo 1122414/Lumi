@@ -50,6 +50,43 @@ class PatchTrackerTest {
         }
     }
 
+    @Test fun diagonalHalfPixelMotionKeepsTheSameFeatureOnTheReturnTrip() {
+        val tracker = PatchTracker()
+        val center = Point(42.5f, 42.5f)
+        assertNotNull(tracker.select(shifted(), crop, center))
+        for (halfSteps in (1..20) + (19 downTo 0)) {
+            val d = halfSteps / 2
+            val frame = if (halfSteps % 2 == 0) shifted(d, d) else image { x, y ->
+                fun at(i: Int, j: Int) = noise[j.coerceIn(0, 89) * 96 + i.coerceIn(0, 95)]
+                val i = x - d; val j = y - d
+                (at(i, j) + at(i - 1, j) + at(i, j - 1) + at(i - 1, j - 1)) / 4
+            }
+            val point = tracker.follow(frame, crop)
+            assertNotNull("lost at half step $halfSteps: ${tracker.failure}", point)
+            val expected = center.x + halfSteps * 0.5f
+            assertEquals("x at half step $halfSteps", expected, point!!.x, 1f)
+            assertEquals("y at half step $halfSteps", expected, point.y, 1f)
+        }
+    }
+
+    @Test fun slowContinuousMotionDoesNotDragTheTemplateOffTheTappedPoint() {
+        val tracker = PatchTracker()
+        val center = Point(42.5f, 42.5f)
+        assertNotNull(tracker.select(shifted(), crop, center))
+        for (step in 1..96) {
+            val d = step / 8
+            val f = step % 8 / 8.0
+            val frame = image { x, y ->
+                val i = (x - d).coerceIn(1, 95)
+                ((1 - f) * noise[y * 96 + i] + f * noise[y * 96 + i - 1]).toInt()
+            }
+            val marker = tracker.follow(frame, crop)
+            assertNotNull("lost at step $step", marker)
+            assertEquals("x at step $step", center.x + step / 8f, marker!!.x, 1f)
+            assertEquals("y at step $step", center.y, marker.y, 1f)
+        }
+    }
+
     @Test fun lowTextureAndEdgeTapsAreRejected() {
         val tracker = PatchTracker()
         assertNull(tracker.select(image { _, _ -> 90 }, crop, Point(42f, 42f)))
@@ -57,6 +94,29 @@ class PatchTrackerTest {
         assertEquals(0, tracker.matchedFrames)
         assertNull(tracker.select(shifted(), crop, Point(10f, 12f)))
         assertEquals(PatchFailure.EDGE, tracker.failure)
+    }
+
+    @Test fun tapAtLastUsablePixelIncludesTheFilterInsideTheCrop() {
+        val tracker = PatchTracker()
+        val last = Point(85.5f, 79.5f)
+        val bytes = ByteBuffer.wrap(ByteArray(noise.size) { noise[it].toByte() })
+        val frame = Luma(bytes, 96, 1)
+        assertEquals(last, tracker.select(frame, Crop(0, 0, 96, 90), last))
+        assertNull(tracker.select(frame, Crop(0, 0, 95, 90), last))
+        assertEquals(PatchFailure.EDGE, tracker.failure)
+    }
+
+    @Test fun twoCopiesOfTheSelectedPatchHideTheMarkerOnThatFrame() {
+        val tracker = PatchTracker()
+        val center = Point(42.5f, 42.5f)
+        assertEquals(center, tracker.select(shifted(), crop, center))
+        val duplicates = image { x, y ->
+            val sourceX = if (x < 42) x + 12 else x - 12
+            noise[y * 96 + sourceX]
+        }
+        assertNull(tracker.follow(duplicates, crop))
+        assertEquals(PatchFailure.AMBIGUOUS, tracker.failure)
+        assertNull(tracker.follow(shifted(), crop))
     }
 
     @Test fun ambiguousRepeatedTextureDoesNotProduceAMarker() {

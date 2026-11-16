@@ -26,7 +26,8 @@ class PatchTracker {
     private var cy = 0
     private var active = false
     private val scores = DoubleArray((SEARCH * 2 + 1) * (SEARCH * 2 + 1))
-    private val tile = IntArray((2 * (SEARCH + RADIUS) + 1) * (2 * (SEARCH + RADIUS) + 1))
+    private val tile = IntArray(MAX_SIDE * MAX_SIDE)
+    private val horizontal = IntArray(MAX_SIDE * (MAX_SIDE + 4))
 
     fun select(y: Luma, c: Crop, p: Point): Point? {
         active = false
@@ -34,25 +35,18 @@ class PatchTracker {
         failure = null
         cx = p.x.toInt()
         cy = p.y.toInt()
-        if (cx - RADIUS < c.left || cy - RADIUS < c.top ||
-            cx + RADIUS >= c.right || cy + RADIUS >= c.bottom) {
+        if (cx - MARGIN < c.left || cy - MARGIN < c.top ||
+            cx + MARGIN >= c.right || cy + MARGIN >= c.bottom) {
             failure = PatchFailure.EDGE
             return null
         }
-        if (!samplePatch(y)) {
-            failure = PatchFailure.LOW_TEXTURE
-            return null
-        }
-        sample.copyInto(template)
-        active = true
-        // Reject repetitive texture even on the selection frame.
-        return follow(y, c)
+        return match(y, c, selecting = true)
     }
 
-    private fun samplePatch(y: Luma): Boolean {
+    private fun samplePatch(base: Int, stride: Int): Boolean {
         var k = 0
-        for (j in -RADIUS..RADIUS step 2) for (i in -RADIUS..RADIUS step 2) {
-            sample[k++] = y[cx + i, cy + j].toDouble()
+        for (j in 0..2 * RADIUS step 2) for (i in 0..2 * RADIUS step 2) {
+            sample[k++] = tile[base + j * stride + i].toDouble()
         }
         val mean = sample.average()
         for (n in sample.indices) sample[n] -= mean
@@ -62,22 +56,44 @@ class PatchTracker {
         return true
     }
 
-    fun follow(y: Luma, c: Crop): Point? {
-        if (!active) return null
-        val x0 = max(c.left + RADIUS, cx - SEARCH)
-        val x1 = min(c.right - 1 - RADIUS, cx + SEARCH)
-        val y0 = max(c.top + RADIUS, cy - SEARCH)
-        val y1 = min(c.bottom - 1 - RADIUS, cy + SEARCH)
+    fun follow(y: Luma, c: Crop): Point? = if (active) match(y, c, selecting = false) else null
+
+    // Low-pass before sampling every other pixel; both template and candidates use the same filter.
+    private fun loadTile(y: Luma, left: Int, top: Int, width: Int, height: Int) {
+        for (j in 0 until height + 4) {
+            val row = top + j - 2
+            for (i in 0 until width) {
+                val x = left + i
+                horizontal[j * width + i] = y[x - 2, row] + 4 * y[x - 1, row] +
+                    6 * y[x, row] + 4 * y[x + 1, row] + y[x + 2, row]
+            }
+        }
+        for (at in 0 until width * height) {
+            tile[at] = (horizontal[at] + 4 * horizontal[at + width] +
+                6 * horizontal[at + 2 * width] + 4 * horizontal[at + 3 * width] +
+                horizontal[at + 4 * width] + 128) / 256
+        }
+    }
+
+    private fun match(y: Luma, c: Crop, selecting: Boolean): Point? {
+        val x0 = max(c.left + MARGIN, cx - SEARCH)
+        val x1 = min(c.right - 1 - MARGIN, cx + SEARCH)
+        val y0 = max(c.top + MARGIN, cy - SEARCH)
+        val y1 = min(c.bottom - 1 - MARGIN, cy + SEARCH)
         val width = x1 - x0 + 1
         val stride = width + 2 * RADIUS
-        var at = 0
-        for (j in y0 - RADIUS..y1 + RADIUS) for (i in x0 - RADIUS..x1 + RADIUS) {
-            tile[at++] = y[i, j]
+        loadTile(y, x0 - RADIUS, y0 - RADIUS, stride, y1 - y0 + 1 + 2 * RADIUS)
+        if (selecting) {
+            if (!samplePatch((cy - y0) * stride + cx - x0, stride)) {
+                failure = PatchFailure.LOW_TEXTURE
+                return null
+            }
+            sample.copyInto(template)
         }
         var best = -1.0
         var bx = cx
         var by = cy
-        at = 0
+        var at = 0
         for (j in y0..y1) for (i in x0..x1) {
             var sum = 0
             var squares = 0
@@ -109,8 +125,14 @@ class PatchTracker {
         matchedFrames++
         cx = bx
         cy = by
-        // Follow gradual appearance changes only after a strong, isolated match.
-        if (best >= 0.90 && best - second >= 0.12 && samplePatch(y)) {
+        // Refresh only on a changed, well-centered appearance. Learning every tiny shift
+        // would move the template across the object while the reported center stays still.
+        val k = (by - y0) * width + bx - x0
+        if (!selecting && best in 0.90..0.98 && best - second >= 0.12 &&
+            bx in (x0 + 1) until x1 && by in (y0 + 1) until y1 &&
+            centeredPeak(scores[k - 1], best, scores[k + 1]) &&
+            centeredPeak(scores[k - width], best, scores[k + width]) &&
+            samplePatch((by - y0) * stride + bx - x0, stride)) {
             for (i in template.indices) template[i] = 0.25 * template[i] + 0.75 * sample[i]
             val norm = sqrt(template.sumOf { it * it })
             for (i in template.indices) template[i] /= norm
@@ -118,10 +140,19 @@ class PatchTracker {
         return Point(cx + 0.5f, cy + 0.5f)
     }
 
+    private fun centeredPeak(left: Double, peak: Double, right: Double): Boolean {
+        val curvature = 2 * peak - left - right
+        // A parabola through the three scores peaks at (right - left) / (2 * curvature).
+        return curvature > 0 && abs(right - left) <= 2 * curvature * MAX_UPDATE_OFFSET_PX
+    }
+
     private companion object {
         const val RADIUS = 8
         const val COUNT = 81
         const val SEARCH = 18
+        const val MAX_UPDATE_OFFSET_PX = 0.2
+        const val MARGIN = RADIUS + 2
+        const val MAX_SIDE = 2 * (SEARCH + RADIUS) + 1
         const val MIN_STD = 7.0
     }
 }
