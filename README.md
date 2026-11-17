@@ -6,7 +6,7 @@
 
 ## 本地配置（仅 debug）
 
-在项目根目录已忽略的 `local.properties` 中保留原有的 `sdk.dir`，另外填写以下三项，再重新构建、安装。接口必须支持 HTTPS、Chat Completions 和内嵌 JPEG 的 `image_url`。
+在项目根目录已忽略的 `local.properties` 中保留原有的 `sdk.dir`，另外填写以下三项，再重新构建、安装。接口需支持 Chat Completions 和内嵌 JPEG 的 `image_url`；远程服务使用 HTTPS。
 
 ```properties
 LUMI_LLM_BASE_URL=https://your-service.example/v1
@@ -15,6 +15,8 @@ LUMI_LLM_API_KEY=your-local-test-key
 ```
 
 以 `/v1` 结尾的地址会追加 `/chat/completions`，也可填完整接口地址。缺少任一项时，「推荐构图」不可用，取景器下方会显示原因。密钥会随本机 debug APK 一起打包，不要分享带密钥的 APK，也不要提交 `local.properties`。release 不注入这些配置。
+
+模型服务运行在 USB 所连的电脑上时，debug 版也接受 `http://127.0.0.1`。例如电脑监听 3425 端口：设 `LUMI_LLM_BASE_URL=http://127.0.0.1:3425/v1`，在电脑执行 `adb reverse tcp:3425 tcp:3425`。手机就能通过 USB 访问该服务，无需让电脑监听局域网。重新连接手机后可用 `adb reverse --list` 检查转发。
 
 ## 构建
 

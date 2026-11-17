@@ -4,6 +4,7 @@ import android.os.SystemClock
 import com.lumi.camera.BuildConfig
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
+import java.net.Proxy
 import java.net.URI
 import java.net.URL
 import java.util.concurrent.Executor
@@ -11,24 +12,27 @@ import java.util.concurrent.atomic.AtomicReference
 
 internal class ModelFailure(val notice: String) : Exception()
 
+internal fun chatEndpoint(value: String, debug: Boolean): URL? = runCatching {
+    val base = URI(value)
+    val usbLoopback = debug && base.scheme.equals("http", true) && base.host == "127.0.0.1"
+    require((base.scheme.equals("https", true) || usbLoopback) && !base.host.isNullOrBlank() &&
+        base.userInfo == null && base.query == null && base.fragment == null)
+    val root = base.toASCIIString().trimEnd('/')
+    when {
+        base.path.trim('/').isEmpty() -> URL(root + "/v1/chat/completions")
+        root.endsWith("/chat/completions") -> URL(root)
+        else -> URL(root + "/chat/completions")
+    }
+}.getOrNull()
+
 internal class VisionChat(private val token: RequestToken) {
     companion object {
-        private val endpoint: URL? = runCatching {
-            val base = URI(BuildConfig.LUMI_LLM_BASE_URL)
-            require(base.scheme.equals("https", true) && !base.host.isNullOrBlank() &&
-                base.userInfo == null && base.query == null && base.fragment == null)
-            val root = base.toASCIIString().trimEnd('/')
-            when {
-                base.path.trim('/').isEmpty() -> URL(root + "/v1/chat/completions")
-                root.endsWith("/chat/completions") -> URL(root)
-                else -> URL(root + "/chat/completions")
-            }
-        }.getOrNull()
+        private val endpoint = chatEndpoint(BuildConfig.LUMI_LLM_BASE_URL, BuildConfig.DEBUG)
         val unavailableReason: String? = when {
             !BuildConfig.DEBUG -> "此版本未启用推荐服务。"
             listOf(BuildConfig.LUMI_LLM_BASE_URL, BuildConfig.LUMI_LLM_MODEL, BuildConfig.LUMI_LLM_API_KEY)
                 .any(String::isBlank) -> "推荐服务未配置，暂不能推荐构图。"
-            endpoint == null -> "推荐服务地址无效，请配置 HTTPS 接口。"
+            endpoint == null -> "推荐服务地址无效，请检查本地配置。"
             else -> null
         }
         const val TIMEOUT_NOTICE = "推荐超时（20 秒），可以重新推荐。"
@@ -53,7 +57,8 @@ internal class VisionChat(private val token: RequestToken) {
     fun send(jpeg: ByteArray): Recommendation {
         remainingMs()
         val payload = ChatProtocol.request(BuildConfig.LUMI_LLM_MODEL, jpeg)
-        val conn = checkNotNull(endpoint).openConnection() as HttpURLConnection
+        val url = checkNotNull(endpoint)
+        val conn = (if (url.protocol == "http") url.openConnection(Proxy.NO_PROXY) else url.openConnection()) as HttpURLConnection
         connection.set(conn)
         try {
             conn.connectTimeout = remainingMs()
