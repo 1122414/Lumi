@@ -14,6 +14,21 @@ internal class Recommendation private constructor(
     val aimPoint: Uv, val confidence: Double, val alreadyGood: Boolean, val reason: String,
 ) {
     companion object {
+        // Android JsonReader also accepts e.g. TRUE and non-JSON string escapes in strict mode.
+        private val jsonToken = java.util.regex.Pattern.compile(
+            """[ \t\r\n]+|[{},:]|true|false|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|(?:"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")""")
+
+        fun hasJsonTokens(text: String): Boolean {
+            if (text.isEmpty() || text.length > 4096) return false
+            val tokens = jsonToken.matcher(text)
+            var end = 0
+            while (tokens.find()) {
+                if (tokens.start() != end) return false
+                end = tokens.end()
+            }
+            return end == text.length
+        }
+
         fun validated(fields: Map<String, Any?>): Recommendation? {
             if (fields.keys != setOf("aimPoint", "confidence", "alreadyGood", "reason")) return null
             val aim = fields["aimPoint"] as? Map<*, *> ?: return null
@@ -34,6 +49,7 @@ internal class Recommendation private constructor(
         val face = source.face ?: return null
         if (box.left !in 0.0..1.0 || box.right !in 0.0..1.0 || box.top !in 0.0..1.0 ||
             box.bottom !in 0.0..1.0 || box.left >= box.right || box.top >= box.bottom) return null
+        if (aimPoint == Uv.CENTER) return source
 
         // Device axes: right, up, towards the photographer. The visible center may
         // differ from the optical axis after the shared ViewPort crop.

@@ -1,7 +1,14 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+val modelSettings = listOf("LUMI_LLM_BASE_URL", "LUMI_LLM_MODEL", "LUMI_LLM_API_KEY")
+val localSettings = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.isFile }?.reader()?.use { load(it) }
 }
 
 android {
@@ -15,8 +22,15 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1"
+        modelSettings.forEach { buildConfigField("String", it, "\"\"") }
     }
-    buildFeatures { compose = true }
+    buildTypes.named("debug") {
+        modelSettings.forEach { key ->
+            val value = localSettings.getProperty(key).orEmpty().trim().takeUnless { s -> s.any(Char::isISOControl) }.orEmpty()
+            buildConfigField("String", key, "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+        }
+    }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

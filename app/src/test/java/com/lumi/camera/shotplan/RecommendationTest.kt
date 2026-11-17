@@ -50,6 +50,23 @@ class RecommendationTest {
         assertTrue(ready)
     }
 
+    @Test fun ringMovesTowardsCenterAndCrossesItWhenThePhoneOvershootsBeforeTheReply() {
+        fun yaw(degrees: Double): Pose {
+            val half = Math.toRadians(degrees) / 2
+            return Pose(cos(half), 0.0, -sin(half), 0.0)
+        }
+        val target = Recommendation.validated(fields(0.5 + source.lens.fx * tan(Math.toRadians(8.0)), 0.5))!!
+            .targetFrom(source, box)!!
+        for (angle in listOf(3.0, 12.0)) {
+            val turned = source.copy(timeNs = 9_000_000_000L, pose = source.pose * yaw(angle))
+            val face = source.face!!
+            val current = turned.copy(face = face.copy(center = RotationProjection(source, turned).project(face.center)!!))
+            val guide = RotationGuidance(target).update(current, current.timeNs, true)
+            checkPoint(Uv(0.5 + source.lens.fx * tan(Math.toRadians(8.0 - angle)), 0.5), guide.ring)
+            assertFalse(guide.ready)
+        }
+    }
+
     @Test fun rejectsMissingExtraWrongTypeOutOfBoundsLowConfidenceAndContradictoryFields() {
         val valid = fields()
         for (key in valid.keys) assertNull(Recommendation.validated(valid - key))
@@ -60,6 +77,14 @@ class RecommendationTest {
             assertNull(change.first, Recommendation.validated(valid + change))
         }
         assertNull(Recommendation.validated(fields(0.55, 0.5) + ("alreadyGood" to true)))
+    }
+
+    @Test fun modelTextMustUseJsonBooleansNumbersAndStringEscapes() {
+        val example = """{"aimPoint":{"x":0.5,"y":5e-1},"confidence":1,"alreadyGood":true,"reason":"人物与\u80cc景。"}"""
+        assertTrue(Recommendation.hasJsonTokens(example))
+        for (bad in listOf(example.replace("true", "TRUE"), example.replace("0.5", ".5"),
+            example.replace("\\u80cc", "\\x55"), example.replace("景", "\t景"),
+            "'aimPoint'", "NaN", "null", "[]")) assertFalse(Recommendation.hasJsonTokens(bad))
     }
 
     @Test fun aVisibleCenterDoesNotExcuseClippingTheFaceAtItsCorner() {

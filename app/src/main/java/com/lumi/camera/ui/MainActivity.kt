@@ -29,6 +29,7 @@ import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.Viewfinder
 import com.lumi.camera.camera.Point
+import com.lumi.camera.shotplan.VisionChat
 import kotlin.math.abs
 import kotlinx.coroutines.delay
 
@@ -95,11 +96,12 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
     var frame by remember { mutableStateOf(Viewfinder()) }
     var paintRing by remember { mutableStateOf<Point?>(null) }
     var bound by remember { mutableStateOf(false) }
+    var recommendationStatus by remember { mutableStateOf<String?>(null) }
     val session = remember(preview, owner) {
         CameraSession(preview, owner, { next ->
             frame = next
             if (next.ring != null || !next.hasTarget) paintRing = next.ring
-        }, { bound = it }, onMessage)
+        }, { bound = it }, onMessage, { recommendationStatus = it })
     }
     DisposableEffect(session) {
         onSession(session)
@@ -142,21 +144,27 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
                 }
             }
         }
-        Text("Lumi   /   构图测试", Modifier.align(Alignment.TopCenter).padding(8.dp), color = Color.White)
+        Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("Lumi", color = Color.White)
+            TextButton(session::rememberComposition, enabled = bound && frame.canRemember) {
+                Text("记住这个构图", fontSize = 12.sp)
+            }
+        }
         Column(Modifier.align(Alignment.BottomCenter), horizontalAlignment = Alignment.CenterHorizontally) {
+            VisionChat.unavailableReason?.let { Text(it, color = Color.LightGray, fontSize = 12.sp) }
             Text(when {
                 frame.ready -> "可以拍"
                 !bound -> "正在打开后置相机"
+                recommendationStatus != null -> recommendationStatus.orEmpty()
                 frame.hasTarget && frame.ring == null -> "构图暂不可确认"
-                frame.hasTarget -> "已记住构图"
+                frame.hasTarget -> "构图引导中"
                 !frame.canRemember -> "等待单人画面与手机姿态"
-                else -> "测试构图"
+                else -> ""
             }, color = Color.White, fontSize = 14.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(session::rememberComposition, enabled = bound && frame.canRemember) {
-                    Text("记住这个构图")
-                }
-                Button(onShoot, enabled = bound) { Text("拍照并保存") }
+                Button(session::recommend, enabled = bound && VisionChat.unavailableReason == null) { Text("推荐构图") }
+                OutlinedButton(onShoot, enabled = bound) { Text("拍照并保存") }
             }
         }
     }

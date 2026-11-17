@@ -19,16 +19,21 @@ import com.lumi.camera.guidance.FacePosition
 import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.Uv
+import java.util.concurrent.atomic.AtomicReference
 
 internal data class FaceBox(val left: Double, val top: Double, val right: Double, val bottom: Double)
 internal data class SceneFrame(val sequence: Long, val capturedNs: Long, val geometry: FrameGeometry,
     val observation: Observation?, val box: FaceBox?, val background: Background?)
 
 internal class CompositionAnalyzer(private val optics: CameraOptics, private val poses: CameraPose,
-    private val deliver: (SceneFrame) -> Unit) : ImageAnalysis.Analyzer, AutoCloseable {
+    private val keepModelFrame: Boolean, private val deliver: (SceneFrame) -> Unit) : ImageAnalysis.Analyzer, AutoCloseable {
     private val detector = FaceDetection.getClient(FaceDetectorOptions.Builder()
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).enableTracking().build())
     private var reportedFailure = false
+    private val modelFrame = AtomicReference<RecommendationFrame?>()
+
+    // Taking transfers ownership; the analysis worker can immediately replace the slot.
+    fun takeModelFrame(): RecommendationFrame? = modelFrame.getAndSet(null)
 
     @androidx.annotation.OptIn(ExperimentalGetImage::class)
     override fun analyze(image: ImageProxy) {
@@ -67,11 +72,21 @@ internal class CompositionAnalyzer(private val optics: CameraOptics, private val
                 reportedFailure = true
                 empty
             }
+            if (keepModelFrame) {
+                val next = if (result.box != null &&
+                    SystemClock.elapsedRealtimeNanos() - captured in 0..RotationGuidance.FRESH_NS) {
+                    try { RecommendationFrame(result, image.toBitmap()) } catch (_: RuntimeException) { null }
+                } else null
+                modelFrame.getAndSet(next)?.close()
+            }
             deliver(result)
         } finally {
             image.close()
         }
     }
 
-    override fun close() = detector.close()
+    override fun close() {
+        takeModelFrame()?.close()
+        detector.close()
+    }
 }
