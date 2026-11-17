@@ -3,6 +3,7 @@ package com.lumi.camera.guidance
 import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.sin
 
@@ -43,8 +44,11 @@ internal class RotationProjection(target: Observation, current: Observation) {
     }
 }
 
-internal data class Guide(val ring: Uv?, val ready: Boolean = false) {
-    val trusted get() = ring != null
+internal enum class GuideEvidence { CONFIRMED, BACKGROUND_UNCERTAIN, FACE_GAP, NO_FACE, OTHER_FACE, MISMATCH, NO_OBSERVATION, STALE }
+
+internal data class Guide(val ring: Uv?, val ready: Boolean = false,
+    val evidence: GuideEvidence = GuideEvidence.NO_OBSERVATION, val merged: Boolean = ready) {
+    val trusted get() = evidence == GuideEvidence.CONFIRMED
 }
 
 internal class RotationGuidance(private val target: Observation) {
@@ -53,37 +57,76 @@ internal class RotationGuidance(private val target: Observation) {
     private var since: Long? = null
     private var count = 0
     private var lastTimestamp = target.timeNs - 1
+    private var lastFaceNs: Long? = null
+    private var lastReadyNs: Long? = null
+    private var displayAim = Uv.CENTER
 
-    fun lost(): Guide {
+    private fun resetHold() {
         previous = null
         since = null
         count = 0
-        return Guide(null)
+    }
+
+    fun lost(reason: GuideEvidence = GuideEvidence.NO_OBSERVATION): Guide {
+        resetHold()
+        lastFaceNs = null
+        lastReadyNs = null
+        displayAim = Uv.CENTER
+        return Guide(null, evidence = reason)
+    }
+
+    private fun recentlyMerged(nowNs: Long, near: Boolean): Boolean {
+        val last = lastReadyNs ?: return false
+        if (near && nowNs - last in 0..MERGED_DISPLAY_NS) return true
+        lastReadyNs = null
+        return false
     }
 
     fun update(current: Observation, nowNs: Long, backgroundAgrees: Boolean): Guide {
-        if (current.timeNs <= lastTimestamp) return lost()
+        if (current.timeNs <= lastTimestamp) return lost(GuideEvidence.STALE)
         lastTimestamp = current.timeNs
+        if (nowNs - current.timeNs !in 0..FRESH_NS) return lost(GuideEvidence.STALE)
+        val projection = RotationProjection(target, current)
+        val center = projection.project(Uv.CENTER) ?: return lost(GuideEvidence.MISMATCH)
+        val angle = current.pose.degreesTo(target.pose)
         val face = current.face
-        if (nowNs - current.timeNs !in 0..FRESH_NS || face == null || face.id != subject.id ||
-            !backgroundAgrees || face.width / subject.width !in 0.70..1.40) return lost()
+        if (face == null) {
+            resetHold()
+            val seen = lastFaceNs
+            if (seen == null || nowNs - seen !in 0..FACE_GAP_NS) return lost(GuideEvidence.NO_FACE)
+            val ring = projection.project(displayAim) ?: return lost(GuideEvidence.MISMATCH)
+            return Guide(ring, evidence = GuideEvidence.FACE_GAP,
+                merged = recentlyMerged(nowNs, angle <= 4.0 && ring.distance(Uv.CENTER) <= 0.045))
+        }
+        if (face.id != subject.id) return lost(GuideEvidence.OTHER_FACE)
+        val width = face.width / subject.width
+        val predicted = projection.project(subject.center) ?: return lost(GuideEvidence.MISMATCH)
+        if (width !in 0.70..1.40 || face.center.distance(predicted) > 0.10) return lost(GuideEvidence.MISMATCH)
+        val observed = Uv(center.x + 0.6 * (face.center.x - predicted.x),
+            center.y + 0.6 * (face.center.y - predicted.y))
 
-        val project = RotationProjection(target, current)
-        val center = project.project(Uv.CENTER) ?: return lost()
-        val predictedFace = project.project(subject.center) ?: return lost()
-        val error = face.center.distance(predictedFace)
-        if (error > 0.10) return lost()
-        val ring = Uv(center.x + 0.6 * (face.center.x - predictedFace.x),
-            center.y + 0.6 * (face.center.y - predictedFace.y))
+        // Smooth the face correction in the target plane, never the phone's rotation or the readiness evidence.
+        val aim = RotationProjection(current, target).project(observed) ?: return lost(GuideEvidence.MISMATCH)
+        val elapsed = lastFaceNs?.let { current.timeNs - it }
+        val weight = if (elapsed != null && elapsed in 1..FRESH_NS) 1.0 - exp(-elapsed / CORRECTION_NS) else 1.0
+        displayAim = Uv(displayAim.x + weight * (aim.x - displayAim.x), displayAim.y + weight * (aim.y - displayAim.y))
+        lastFaceNs = current.timeNs
+        val ring = projection.project(displayAim) ?: return lost(GuideEvidence.MISMATCH)
+        val offset = observed.distance(Uv.CENTER)
+        val faceOffset = face.center.distance(subject.center)
+        val near = offset <= 0.045 && faceOffset <= 0.055 && width in 0.80..1.24 && angle <= 4.0
+        if (!backgroundAgrees) {
+            resetHold()
+            return Guide(ring, evidence = GuideEvidence.BACKGROUND_UNCERTAIN, merged = recentlyMerged(nowNs, near))
+        }
 
         val prior = previous
         previous = current
-        val dt = prior?.let { current.timeNs - it.timeNs }
-        val still = prior != null && dt != null && dt in 1..180_000_000L &&
-            prior.pose.degreesTo(current.pose) <= 8.0 * dt / 1e9
-        val aligned = ring.distance(Uv.CENTER) <= 0.025 &&
-            face.center.distance(subject.center) <= 0.035 && face.width / subject.width in 0.85..1.18 &&
-            current.pose.degreesTo(target.pose) <= 2.5
+        val dt = prior?.let { current.timeNs - it.timeNs } ?: 0L
+        val continuous = dt in 1..180_000_000L
+        val wasReady = prior != null && prior.timeNs == lastReadyNs && continuous && near
+        val still = prior != null && continuous && prior.pose.degreesTo(current.pose) <= 8.0 * dt / 1e9
+        val aligned = offset <= 0.025 && faceOffset <= 0.035 && width in 0.85..1.18 && angle <= 2.5
         if (!aligned) {
             since = null
             count = 0
@@ -94,9 +137,15 @@ internal class RotationGuidance(private val target: Observation) {
             }
             count++
         }
-        val ready = count >= 3 && since?.let { current.timeNs - it >= 350_000_000L } == true
-        return Guide(if (ready) Uv.CENTER else ring, ready)
+        val ready = wasReady || (count >= 3 && since?.let { current.timeNs - it >= 350_000_000L } == true)
+        if (ready) lastReadyNs = current.timeNs
+        return Guide(if (ready) Uv.CENTER else ring, ready, GuideEvidence.CONFIRMED, recentlyMerged(nowNs, near))
     }
 
-    companion object { const val FRESH_NS = 250_000_000L }
+    companion object {
+        const val FRESH_NS = 250_000_000L
+        private const val FACE_GAP_NS = 200_000_000L
+        private const val CORRECTION_NS = 90_000_000.0
+        private const val MERGED_DISPLAY_NS = 550_000_000L
+    }
 }

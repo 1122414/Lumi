@@ -98,4 +98,121 @@ class RotationGuidanceTest {
             assertFalse(g.feed(sample(800)).ready)
         }
     }
+
+    @Test fun aNoisyBackgroundCannotBlinkOutARotationSupportedByTheSameFace() {
+        val g = RotationGuidance(target)
+        for (i in 0..12) {
+            val angle = 2.0 + i * 0.5
+            val expected = 0.5 - lens.fx * tan(Math.toRadians(angle))
+            val o = sample(50L * i, right(angle), Uv(expected, 0.5))
+            val guide = g.update(o, o.timeNs, backgroundAgrees = i % 4 == 0)
+            assertNotNull("direction at frame $i", guide.ring)
+            assertEquals(expected, guide.ring!!.x, 1e-6)
+            assertFalse(guide.ready)
+        }
+    }
+
+    @Test fun aBriefFaceGapReprojectsFromFreshPoseButCannotGrantOrExtendReadiness() {
+        val g = RotationGuidance(target)
+        for (ms in 0L..400L step 50) g.feed(sample(ms))
+        assertTrue(g.feed(sample(450)).ready)
+        val missing = sample(500, right(5.0)).copy(face = null)
+        val pending = g.update(missing, missing.timeNs, false)
+        assertNotNull(pending.ring)
+        assertEquals(0.5 - lens.fx * tan(Math.toRadians(5.0)), pending.ring!!.x, 1e-6)
+        assertFalse(pending.ready)
+        assertFalse(pending.trusted)
+        assertNull(g.feed(sample(740, right(6.0)).copy(face = null)).ring)
+        assertFalse(g.feed(sample(780)).ready)
+        assertNotNull(g.feed(sample(820)).ring)
+    }
+
+    @Test fun smallVerifiedHandTremorAfterSettlingDoesNotReopenTheRing() {
+        val g = RotationGuidance(target)
+        for (ms in 0L..400L step 50) g.feed(sample(ms))
+        assertTrue(g.feed(sample(450)).ready)
+        fun turned(ms: Long, deg: Double) =
+            sample(ms, right(deg), Uv(0.5 - lens.fx * tan(Math.toRadians(deg)), 0.5))
+        assertTrue(g.feed(turned(500, 1.5)).ready)
+        val departed = g.feed(turned(550, 6.0))
+        assertFalse(departed.ready)
+        assertTrue(departed.ring!!.x < 0.4)
+        assertFalse(g.feed(sample(600)).ready)
+    }
+
+    @Test fun aMissDoesNotFlashTheMergedOverlayOrSkipTheNextHold() {
+        val g = RotationGuidance(target)
+        for (ms in 0L..450L step 50) g.feed(sample(ms))
+        val miss = g.feed(sample(500).copy(face = null))
+        assertTrue(miss.merged)
+        assertFalse(miss.ready)
+        for (ms in 550L..850L step 50) {
+            val restored = g.feed(sample(ms))
+            assertTrue(restored.merged)
+            assertFalse(restored.ready)
+        }
+        assertTrue(g.feed(sample(900)).ready)
+        for (ms in 950L..1500L step 50) {
+            val o = sample(ms)
+            val unconfirmed = g.update(o, o.timeNs, false)
+            assertFalse(unconfirmed.ready)
+            if (ms == 1500L) assertFalse(unconfirmed.merged)
+        }
+    }
+
+    @Test fun aWrongSubjectOrExpiredFrameDropsTheDirectionUntilFreshFaceEvidence() {
+        for (stale in listOf(false, true)) {
+            val g = RotationGuidance(target)
+            assertNull(g.feed(sample(0).copy(face = null)).ring)
+            g.feed(sample(100))
+            val o = sample(150).let { if (stale) it else it.copy(face = face.copy(id = 23)) }
+            val rejected = g.update(o, o.timeNs + if (stale) 251_000_000L else 0L, true)
+            assertNull(rejected.ring)
+            assertFalse(rejected.ready)
+            assertNull(g.feed(sample(if (stale) 420 else 180).copy(face = null)).ring)
+            val recovered = g.feed(sample(470))
+            assertNotNull(recovered.ring)
+            assertFalse(recovered.ready)
+        }
+    }
+
+    @Test fun smoothingReducesFaceJitterWithoutMakingTheRingLagBehindRotation() {
+        val g = RotationGuidance(target)
+        g.feed(sample(0))
+        val jitter = g.feed(sample(30, uv = Uv(0.55, 0.5))).ring!!
+        assertTrue(jitter.x in 0.50..0.52)
+        val angle = 10.0
+        val projected = 0.5 - lens.fx * tan(Math.toRadians(angle))
+        val turned = g.feed(sample(60, right(angle), Uv(projected, 0.5)))
+        assertEquals(projected, turned.ring!!.x, 0.015)
+        assertFalse(turned.ready)
+    }
+
+    @Test fun aSmoothedRingStillNearTheCenterCannotHideARealDeparture() {
+        val g = RotationGuidance(target)
+        for (ms in 0L..450L step 50) g.feed(sample(ms))
+        val departed = g.feed(sample(466, uv = Uv(0.585, 0.5)))
+        assertTrue(departed.ring!!.distance(Uv.CENTER) < 0.025)
+        assertFalse(departed.ready)
+        assertFalse(departed.merged)
+    }
+
+    @Test fun turningAndTiltingTogetherKeepsTheDirectionThroughIntermittentVision() {
+        val g = RotationGuidance(target)
+        for (i in 0..10) {
+            val yaw = 10.0 - i
+            val tilt = -yaw * 0.6
+            val x = 0.5 - lens.fx * tan(Math.toRadians(yaw)) / cos(Math.toRadians(tilt))
+            val y = 0.5 + lens.fy * tan(Math.toRadians(tilt))
+            val seen = sample(40L * i, right(yaw) * pitch(tilt), Uv(x, y))
+            val current = if (i in 4..5) seen.copy(face = null) else seen
+            val guide = g.update(current, current.timeNs, backgroundAgrees = i % 3 != 1)
+            assertNotNull("both axes keep following the phone at frame $i", guide.ring)
+            assertEquals(x, guide.ring!!.x, 1e-6)
+            assertEquals(y, guide.ring.y, 1e-6)
+            assertFalse(guide.ready)
+        }
+        for (ms in 450L..750L step 50) assertFalse(g.feed(sample(ms)).ready)
+        assertTrue(g.feed(sample(800)).ready)
+    }
 }

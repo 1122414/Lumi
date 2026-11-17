@@ -26,7 +26,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import com.lumi.camera.BuildConfig
 import com.lumi.camera.guidance.Guide
+import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.shotplan.ModelFailure
@@ -41,7 +43,7 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
 
 internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: Boolean = false,
-    val ring: Point? = null, val ready: Boolean = false)
+    val ring: Point? = null, val ready: Boolean = false, val merged: Boolean = false)
 
 internal class CameraSession(
     private val view: PreviewView,
@@ -70,6 +72,18 @@ internal class CameraSession(
     private val displays = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private class Run(val target: RememberedComposition) {
         val guidance = RotationGuidance(target.observation)
+        private var lastEvidence: GuideEvidence? = null
+        private var lastReady = false
+        private var lastLogNs = 0L
+
+        fun trace(guide: Guide, nowNs: Long) {
+            if (!BuildConfig.DEBUG || (guide.evidence == lastEvidence && guide.ready == lastReady) ||
+                nowNs - lastLogNs < 500_000_000L) return
+            lastEvidence = guide.evidence
+            lastReady = guide.ready
+            lastLogNs = nowNs
+            Log.d("LumiGuidance", "evidence=${guide.evidence} ring=${guide.ring != null} ready=${guide.ready}")
+        }
     }
     private var run: Run? = null
     private var latest: SceneFrame? = null
@@ -83,7 +97,10 @@ internal class CameraSession(
     private var disposed = false
     private val expire = Runnable {
         latest = null
-        run?.guidance?.lost()
+        run?.let { active ->
+            val guide = active.guidance.lost(GuideEvidence.STALE)
+            active.trace(guide, SystemClock.elapsedRealtimeNanos())
+        }
         onFrame(Viewfinder(hasTarget = run != null))
     }
     private val layout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> bind() }
@@ -172,18 +189,19 @@ internal class CameraSession(
         latest = frame
         val current = frame.observation
         val t = run
-        val guide = if (t == null || current == null || frame.background == null) {
+        val guide = if (t == null || current == null) {
             t?.guidance?.lost() ?: Guide(null)
         } else {
-            val agrees = frame.background.agrees(t.target.marks, RotationProjection(t.target.backgroundSource, current))
+            val agrees = frame.background?.agrees(t.target.marks, RotationProjection(t.target.backgroundSource, current)) == true
             t.guidance.update(current, now, agrees)
         }
+        t?.trace(guide, now)
         val ring = guide.ring?.let {
             val ref = frame.geometry.referenceSize
             FrameMapping(frame.geometry, size).referenceToPreview(
                 Point((it.x * ref.width).toFloat(), (it.y * ref.height).toFloat()))
         }
-        onFrame(Viewfinder(current?.face != null, t != null, ring, guide.ready))
+        onFrame(Viewfinder(current?.face != null, t != null, ring, guide.ready, guide.merged))
         handler.postDelayed(expire, (RotationGuidance.FRESH_NS - age) / 1_000_000L + 1)
     }
 

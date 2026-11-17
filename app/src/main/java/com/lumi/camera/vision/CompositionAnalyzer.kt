@@ -54,7 +54,9 @@ internal class CompositionAnalyzer(private val optics: CameraOptics, private val
                     val faces = Tasks.await(detector.process(InputImage.fromMediaImage(media, frame.rotation)))
                     val face = faces.singleOrNull()
                     val id = face?.trackingId
-                    if (face == null || id == null) empty else {
+                    if (faces.size > 1) empty
+                    else if (face == null || id == null) empty.copy(observation = Observation(captured, pose, lens, null))
+                    else {
                         val bounds = face.boundingBox
                         val size = frame.referenceSize
                         val p = frame.uprightToReference(Point(bounds.left.toFloat(), bounds.top.toFloat()))

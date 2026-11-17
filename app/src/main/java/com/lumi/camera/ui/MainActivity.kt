@@ -110,9 +110,9 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
     }
 
     var settled by remember { mutableStateOf(false) }
-    LaunchedEffect(frame.ready) {
+    LaunchedEffect(frame.merged) {
         settled = false
-        if (frame.ready) {
+        if (frame.merged) {
             delay(500)
             settled = true
         }
