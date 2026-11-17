@@ -18,6 +18,8 @@ LUMI_LLM_API_KEY=your-local-test-key
 
 模型服务运行在 USB 所连的电脑上时，debug 版也接受 `http://127.0.0.1`。例如电脑监听 3425 端口：设 `LUMI_LLM_BASE_URL=http://127.0.0.1:3425/v1`，在电脑执行 `adb reverse tcp:3425 tcp:3425`。手机就能通过 USB 访问该服务，无需让电脑监听局域网。重新连接手机后可用 `adb reverse --list` 检查转发。
 
+使用 `workbuddy/deepseek-v4.1-flash` 时，Lumi 关闭长推理并将输出上限设为 192 tokens，用于在 20 秒内生成简短构图 JSON。
+
 ## 构建
 
 需要 JDK 21、Android SDK Platform 36、Build Tools 36.0.0。通过 Android Studio、环境变量 `ANDROID_HOME` 或本机的 `local.properties` 指定 SDK 位置。本机 Android Studio 的 JDK 可用：

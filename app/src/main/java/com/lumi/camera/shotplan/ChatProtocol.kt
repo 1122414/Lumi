@@ -22,8 +22,12 @@ internal object ChatProtocol {
         val content = JSONArray().put(JSONObject().put("type", "text").put("text", prompt))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", url)))
         val messages = JSONArray().put(JSONObject().put("role", "user").put("content", content))
-        return JSONObject().put("model", model).put("messages", messages).put("stream", false)
-            .toString().toByteArray(Charsets.UTF_8)
+        val body = JSONObject().put("model", model).put("messages", messages).put("stream", false)
+        // This route supports non-thinking vision; other compatible endpoints may reject these options.
+        if (model == "workbuddy/deepseek-v4.1-flash") {
+            body.put("reasoning_effort", "none").put("max_tokens", 192)
+        }
+        return body.toString().toByteArray(Charsets.UTF_8)
     }
 
     fun response(body: String): Recommendation? {
