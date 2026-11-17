@@ -13,6 +13,23 @@ data class Crop(val left: Int, val top: Int, val right: Int, val bottom: Int) {
     init { require(left >= 0 && top >= 0 && width > 0 && height > 0) }
 }
 data class FrameGeometry(val buffer: Extent, val crop: Crop, val rotation: Int) {
+    val referenceSize get() = if (rotation % 180 == 0) Extent(crop.width, crop.height)
+        else Extent(crop.height, crop.width)
+
+    // ML Kit returns positions in the rotated full image, before the ViewPort crop.
+    fun uprightToReference(p: Point): Point = when (rotation) {
+        0 -> Point(p.x - crop.left, p.y - crop.top)
+        90 -> Point(p.x - (buffer.height - crop.bottom), p.y - crop.left)
+        180 -> Point(p.x - (buffer.width - crop.right), p.y - (buffer.height - crop.bottom))
+        else -> Point(p.x - crop.top, p.y - (buffer.width - crop.right))
+    }
+
+    fun referenceToAnalysis(x: Float, y: Float): Point = when (rotation) {
+        0 -> Point(crop.left + x, crop.top + y)
+        90 -> Point(crop.left + y, crop.bottom - x)
+        180 -> Point(crop.right - x, crop.bottom - y)
+        else -> Point(crop.right - y, crop.top + x)
+    }
     init {
         require(crop.right <= buffer.width && crop.bottom <= buffer.height)
         require(rotation in setOf(0, 90, 180, 270))
@@ -45,19 +62,14 @@ class FrameMapping(val frame: FrameGeometry, val view: Extent, mode: CenterScale
         }
     }
 
-    fun toPreview(p: Point): Point = toReference(p).let { Point(dx + it.x * scale, dy + it.y * scale) }
+    fun referenceToPreview(p: Point): Point = Point(dx + p.x * scale, dy + p.y * scale)
+    fun toPreview(p: Point): Point = referenceToPreview(toReference(p))
 
     fun previewToAnalysis(p: Point): Point? {
         if (p.x !in 0f..view.width.toFloat() || p.y !in 0f..view.height.toFloat()) return null
         val x = (p.x - dx) / scale
         val y = (p.y - dy) / scale
         if (x !in 0f..rw.toFloat() || y !in 0f..rh.toFloat()) return null
-        val raw = when (frame.rotation) {
-            0 -> Point(x, y)
-            90 -> Point(y, c.height - x)
-            180 -> Point(c.width - x, c.height - y)
-            else -> Point(c.width - y, x)
-        }
-        return Point(raw.x + c.left, raw.y + c.top)
+        return frame.referenceToAnalysis(x, y)
     }
 }

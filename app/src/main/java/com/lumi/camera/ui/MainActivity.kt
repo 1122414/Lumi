@@ -10,7 +10,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -19,7 +20,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,9 +27,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.camera.view.PreviewView
 import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
-import com.lumi.camera.camera.PatchFailure
+import com.lumi.camera.camera.Viewfinder
 import com.lumi.camera.camera.Point
-import java.util.Locale
+import kotlin.math.abs
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     private var allowed by mutableStateOf(false)
@@ -91,69 +92,72 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
-    var marker by remember { mutableStateOf<Point?>(null) }
-    var trackingHint by remember { mutableStateOf<String?>(null) }
-    var stats by remember { mutableStateOf("等待分析帧") }
+    var frame by remember { mutableStateOf(Viewfinder()) }
+    var paintRing by remember { mutableStateOf<Point?>(null) }
     var bound by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf(false) }
     val session = remember(preview, owner) {
-        var nextStatsNs = Long.MIN_VALUE
-        CameraSession(preview, owner, { result ->
-            marker = result?.marker
-            trackingHint = result?.failure?.let { failure ->
-                if (result.recovering) return@let "暂时看不清，正在附近核对原图案"
-                val phase = if (result.matchedFrames == 0) "未选中" else "已跟踪 ${result.matchedFrames} 帧后丢失"
-                val reason = when (failure) {
-                    PatchFailure.EDGE, PatchFailure.OUTSIDE -> "请点取景区内侧"
-                    PatchFailure.LOW_TEXTURE -> "纹理不足，请点清晰的字角"
-                    PatchFailure.WEAK_MATCH -> "没有相似的图案，请重新点选"
-                    PatchFailure.AMBIGUOUS -> "相似位置过多，请换一个特征"
-                    PatchFailure.EXPIRED -> "未能及时确认原图案，请重新点选"
-                }
-                "$phase：$reason"
-            }
-            if (result != null && result.frame.timestampNs >= nextStatsNs) {
-                val f = result.frame.geometry
-                stats = String.format(Locale.ROOT, "%.1f fps  ·  %.1f ms\n%d × %d  ·  %d°",
-                    result.fps, result.elapsedMs, f.buffer.width, f.buffer.height, f.rotation)
-                nextStatsNs = result.frame.timestampNs + 250_000_000L
-            }
-        }, { active ->
-            bound = active
-            if (!active) { selected = false; stats = "等待分析帧"; nextStatsNs = Long.MIN_VALUE }
-        }, onMessage)
+        CameraSession(preview, owner, { next ->
+            frame = next
+            if (next.ring != null || !next.hasTarget) paintRing = next.ring
+        }, { bound = it }, onMessage)
     }
     DisposableEffect(session) {
         onSession(session)
         session.attach()
         onDispose { onSession(null); session.dispose() }
     }
-    Text("Lumi   /   坐标验证", Modifier.padding(8.dp), color = Color.White)
-    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Box(Modifier.aspectRatio(3f / 4f).background(Color.Black)) {
-            AndroidView({ preview }, Modifier.matchParentSize())
-            Canvas(Modifier.matchParentSize().pointerInput(session) {
-                detectTapGestures { if (bound) {
-                    selected = true
-                    session.select(Point(it.x, it.y))
-                } }
-            }) {
-                marker?.let {
-                    val center = Offset(it.x, it.y)
-                    drawCircle(Color.Black, 10.dp.toPx(), center, style = Stroke(4.dp.toPx()))
-                    drawCircle(Color(0xFFFFCF73), 10.dp.toPx(), center, style = Stroke(2.dp.toPx()))
-                    drawCircle(Color.White, 1.5.dp.toPx(), center)
-                }
-            }
-            Text(stats, Modifier.padding(8.dp).background(Color.Black.copy(alpha = .7f)).padding(5.dp),
-                color = Color.White, fontSize = 12.sp, lineHeight = 16.sp)
+
+    var settled by remember { mutableStateOf(false) }
+    LaunchedEffect(frame.ready) {
+        settled = false
+        if (frame.ready) {
+            delay(500)
+            settled = true
         }
     }
-    Text(when {
-        !bound -> "正在打开后置相机"
-        !selected -> "轻点一个有纹理的物体，验证标记位置"
-        marker == null -> trackingHint ?: "等待确认本次选点"
-        else -> "移动手机，观察标记是否贴住原处"
-    }, Modifier.padding(top = 8.dp), color = Color.White, fontSize = 13.sp)
-    Button(onClick = onShoot, enabled = bound, modifier = Modifier.padding(8.dp)) { Text("拍照并保存") }
+    val alpha by animateFloatAsState(if (frame.ring != null && !settled) 1f else 0f,
+        tween(120), label = "ring visibility")
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val controlsHeight = minOf(90.dp, maxHeight * 0.24f)
+        Box(Modifier.fillMaxSize().padding(vertical = controlsHeight), contentAlignment = Alignment.Center) {
+            Box(Modifier.aspectRatio(3f / 4f).background(Color.Black)) {
+                AndroidView({ preview }, Modifier.matchParentSize())
+                Canvas(Modifier.matchParentSize()) {
+                    val mid = center
+                    paintRing?.takeIf { alpha > 0f }?.let {
+                        val dx = it.x - mid.x
+                        val dy = it.y - mid.y
+                        val radius = 11.dp.toPx()
+                        val inset = radius + 3.dp.toPx()
+                        // An off-screen projection meets the border along the same line.
+                        val scaleX = if (dx == 0f) 1f else (mid.x - inset) / abs(dx)
+                        val scaleY = if (dy == 0f) 1f else (mid.y - inset) / abs(dy)
+                        val scale = minOf(1f, scaleX, scaleY).coerceAtLeast(0f)
+                        val ring = Offset(mid.x + dx * scale, mid.y + dy * scale)
+                        val green = Color(0xFF38DF85)
+                        drawLine(green, mid, ring, 1.5.dp.toPx(), alpha = alpha)
+                        drawCircle(green, radius, ring, alpha = alpha, style = Stroke(2.5.dp.toPx()))
+                    }
+                    drawCircle(Color.White, 3.dp.toPx(), mid)
+                }
+            }
+        }
+        Text("Lumi   /   构图测试", Modifier.align(Alignment.TopCenter).padding(8.dp), color = Color.White)
+        Column(Modifier.align(Alignment.BottomCenter), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(when {
+                frame.ready -> "可以拍"
+                !bound -> "正在打开后置相机"
+                frame.hasTarget && frame.ring == null -> "构图暂不可确认"
+                frame.hasTarget -> "已记住构图"
+                !frame.canRemember -> "等待单人画面与手机姿态"
+                else -> "测试构图"
+            }, color = Color.White, fontSize = 14.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(session::rememberComposition, enabled = bound && frame.canRemember) {
+                    Text("记住这个构图")
+                }
+                Button(onShoot, enabled = bound) { Text("拍照并保存") }
+            }
+        }
+    }
 }

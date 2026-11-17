@@ -11,6 +11,8 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.view.View
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -24,13 +26,21 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import com.lumi.camera.guidance.Guide
+import com.lumi.camera.guidance.RotationGuidance
+import com.lumi.camera.guidance.RotationProjection
+import com.lumi.camera.shotplan.RememberedComposition
+import com.lumi.camera.vision.CompositionAnalyzer
+import com.lumi.camera.vision.SceneFrame
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicReference
+
+internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: Boolean = false,
+    val ring: Point? = null, val ready: Boolean = false)
 
 internal class CameraSession(
     private val view: PreviewView,
     private val owner: LifecycleOwner,
-    private val onFrame: (AnalysisResult?) -> Unit,
+    private val onFrame: (Viewfinder) -> Unit,
     private val onBound: (Boolean) -> Unit,
     private val onMessage: (String) -> Unit,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
@@ -41,14 +51,24 @@ internal class CameraSession(
     private val worker = Executors.newSingleThreadExecutor()
     private val future = ProcessCameraProvider.getInstance(context)
     private val displays = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-    private val selection = AtomicReference(Tap(0, null))
+    private class Run(val target: RememberedComposition) {
+        val guidance = RotationGuidance(target.observation)
+    }
+    private var run: Run? = null
+    private var latest: SceneFrame? = null
+    private var poses: CameraPose? = null
+    private var observer: CompositionAnalyzer? = null
     private var provider: ProcessCameraProvider? = null
     private var binding: Binding? = null
     private val frames = FrameGate()
     private var uses = emptyArray<UseCase>()
     private var capture: ImageCapture? = null
     private var disposed = false
-    private val expire = Runnable { onFrame(null) }
+    private val expire = Runnable {
+        latest = null
+        run?.guidance?.lost()
+        onFrame(Viewfinder(hasTarget = run != null))
+    }
     private val layout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> bind() }
 
     fun attach() {
@@ -73,6 +93,7 @@ internal class CameraSession(
     override fun onDisplayAdded(displayId: Int) = Unit
     override fun onDisplayRemoved(displayId: Int) = Unit
 
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun bind() {
         val p = provider ?: return
         val rotation = view.display?.rotation ?: return
@@ -82,28 +103,31 @@ internal class CameraSession(
         if (next == binding) return
         val viewport = view.getViewPort(rotation) ?: return
         releaseBinding()
-        val run = frames.session
+        val generation = frames.session
         val preview = Preview.Builder().setTargetRotation(rotation).build()
-        val analysis = ImageAnalysis.Builder().setTargetRotation(rotation)
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+        val readings = FocalReadings()
+        val analysisBuilder = ImageAnalysis.Builder().setTargetRotation(rotation)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        Camera2Interop.Extender(analysisBuilder).setSessionCaptureCallback(readings)
+        val analysis = analysisBuilder.build()
         val photo = ImageCapture.Builder().setTargetRotation(rotation).build()
         preview.setSurfaceProvider(view.surfaceProvider)
-        analysis.setAnalyzer(worker, FrameAnalyzer(next.size, selection) { result ->
-            main.execute {
-                if (frames.accept(run, result.tapId, result.frame.timestampNs)) {
-                    handler.removeCallbacks(expire)
-                    val remaining = 300L - (SystemClock.elapsedRealtime() - result.startedAtMs)
-                    onFrame(if (remaining > 0) result else null)
-                    if (remaining > 0 && result.marker != null) handler.postDelayed(expire, remaining)
-                }
-            }
-        })
         val group = UseCaseGroup.Builder().setViewPort(viewport)
             .addUseCase(preview).addUseCase(analysis).addUseCase(photo).build()
         uses = arrayOf(preview, analysis, photo)
         try {
             val camera = p.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
             camera.cameraControl.setZoomRatio(1f)
+            val sensors = CameraPose(context, rotation)
+            poses = sensors
+            if (!sensors.start()) onMessage("此设备的旋转矢量传感器不可用。")
+            val analyzer = CompositionAnalyzer(CameraOptics(camera.cameraInfo, readings), sensors) { result ->
+                main.execute {
+                    if (frames.accept(generation, 0, result.sequence)) receive(result, next.size)
+                }
+            }
+            observer = analyzer
+            analysis.setAnalyzer(worker, analyzer)
             binding = next
             capture = photo
             onBound(true)
@@ -114,11 +138,47 @@ internal class CameraSession(
         }
     }
 
-    fun select(point: Point) {
-        if (binding == null) return
-        selection.set(Tap(frames.select(), point))
+    private fun receive(frame: SceneFrame, size: Extent) {
         handler.removeCallbacks(expire)
-        onFrame(null)
+        val now = SystemClock.elapsedRealtimeNanos()
+        val age = now - frame.capturedNs
+        if (run?.target?.geometry?.let { it != frame.geometry } == true) run = null
+        if (age !in 0..RotationGuidance.FRESH_NS) {
+            expire.run()
+            return
+        }
+        latest = frame
+        val current = frame.observation
+        val t = run
+        val guide = if (t == null || current == null || frame.background == null) {
+            t?.guidance?.lost() ?: Guide(null)
+        } else {
+            val agrees = frame.background.agrees(t.target.marks, RotationProjection(t.target.observation, current))
+            t.guidance.update(current, now, agrees)
+        }
+        val ring = guide.ring?.let {
+            val ref = frame.geometry.referenceSize
+            FrameMapping(frame.geometry, size).referenceToPreview(
+                Point((it.x * ref.width).toFloat(), (it.y * ref.height).toFloat()))
+        }
+        onFrame(Viewfinder(current?.face != null, t != null, ring, guide.ready))
+        handler.postDelayed(expire, (RotationGuidance.FRESH_NS - age) / 1_000_000L + 1)
+    }
+
+    fun rememberComposition() {
+        val frame = latest ?: return
+        val now = SystemClock.elapsedRealtimeNanos()
+        if (now - frame.capturedNs !in 0..RotationGuidance.FRESH_NS) {
+            expire.run()
+            return
+        }
+        val capturePose = frame.observation?.pose ?: return
+        if (poses?.at(now)?.degreesTo(capturePose)?.let { it <= 1.5 } != true) {
+            onMessage("取景时的姿态已变化，本次未记录。")
+            return
+        }
+        run = Run(RememberedComposition.from(frame) ?: return)
+        binding?.let { receive(frame, it.size) }
     }
 
     fun save() {
@@ -145,15 +205,20 @@ internal class CameraSession(
 
     private fun releaseBinding() {
         frames.reset()
-        selection.set(Tap(0, null))
+        latest = null
+        run = null
+        poses?.close()
+        poses = null
         handler.removeCallbacks(expire)
         uses.filterIsInstance<ImageAnalysis>().forEach { it.clearAnalyzer() }
         if (uses.isNotEmpty()) provider?.unbind(*uses)
+        observer?.let { worker.execute(it::close) }
+        observer = null
         uses = emptyArray()
         binding = null
         capture = null
         onBound(false)
-        onFrame(null)
+        onFrame(Viewfinder())
     }
 
     fun dispose() {

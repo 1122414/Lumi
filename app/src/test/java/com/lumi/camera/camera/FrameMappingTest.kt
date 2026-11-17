@@ -35,6 +35,18 @@ class FrameMappingTest {
         check(Point(500f, 220f), m.previewToAnalysis(Point(360f, 720f)))
     }
 
+    @Test fun uprightDetectorPointAndProjectedRingShareTheCroppedPreview() {
+        val raw = Point(200f, 130f)
+        val fullImagePoints = listOf(Point(200f, 130f), Point(350f, 200f),
+            Point(440f, 350f), Point(130f, 440f))
+        for ((quarterTurns, full) in fullImagePoints.withIndex()) {
+            val m = mapping(quarterTurns * 90, Extent(333, 517))
+            val ref = m.frame.uprightToReference(full)
+            check(raw, m.frame.referenceToAnalysis(ref.x, ref.y))
+            check(m.toPreview(raw), m.referenceToPreview(ref))
+        }
+    }
+
     @Test fun fitCenterLetterboxRejectsTapsOutsideTheImage() {
         val m = mapping(0, Extent(960, 960), CenterScale.FIT)
         check(Point(0f, 120f), m.toPreview(Point(80f, 40f)))
