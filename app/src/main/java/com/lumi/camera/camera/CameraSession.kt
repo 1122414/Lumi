@@ -40,6 +40,7 @@ import com.lumi.camera.shotplan.RememberedComposition
 import com.lumi.camera.shotplan.RequestToken
 import com.lumi.camera.shotplan.VisionChat
 import com.lumi.camera.vision.CompositionAnalyzer
+import com.lumi.camera.vision.RecommendationFrame
 import com.lumi.camera.vision.SubjectOutline
 import com.lumi.camera.vision.SceneFrame
 import java.net.SocketTimeoutException
@@ -68,8 +69,9 @@ internal class CameraSession(
     private var requestGeometry: FrameGeometry? = null
     private val timeout = Runnable {
         if (requests.active != null) {
+            val notice = if (call == null) "取景超时，未取得同步的画面和手机姿态。" else VisionChat.TIMEOUT_NOTICE
             cancelRecommendation()
-            onRecommendationStatus(VisionChat.TIMEOUT_NOTICE)
+            onRecommendationStatus(notice)
         }
     }
     private val future = ProcessCameraProvider.getInstance(context)
@@ -196,7 +198,7 @@ internal class CameraSession(
             poses = sensors
             if (!sensors.start()) onMessage("此设备的旋转矢量传感器不可用。")
             val analyzer = CompositionAnalyzer(context, CameraOptics(camera.cameraInfo, readings), sensors,
-                keepModelFrame = VisionChat.unavailableReason == null) { result ->
+                modelFrameReady = { token, sample -> main.execute { sendRecommendation(token, sample) } }) { result ->
                 main.execute {
                     if (frames.accept(generation, 0, result.sequence)) receive(result)
                 }
@@ -317,21 +319,28 @@ internal class CameraSession(
         selection = null
         observer?.selected = null
         onFrame(Viewfinder(canRemember = latest?.observation?.subject != null))
-        val sample = observer?.takeModelFrame()
-        if (sample == null || now - sample.scene.capturedNs !in 0..RotationGuidance.FRESH_NS ||
-            latest?.geometry != sample.scene.geometry) {
-            sample?.close()
-            onRecommendationStatus("取景尚未就绪，请稍后重新推荐。")
+        val token = requests.begin(now)
+        observer?.pendingFrame?.await(token)
+        onRecommendationStatus("正在取景…")
+        handler.postDelayed(timeout, (token.deadlineNs - now) / 1_000_000L)
+    }
+
+    private fun sendRecommendation(token: RequestToken, sample: RecommendationFrame) {
+        val source = sample.scene
+        val now = SystemClock.elapsedRealtimeNanos()
+        if (requests.active != token || now >= token.deadlineNs) {
+            sample.close()
             return
         }
-        val source = sample.scene
-        val token = requests.begin(now)
+        if (now - source.capturedNs !in 0..RotationGuidance.FRESH_NS) {
+            sample.close()
+            observer?.pendingFrame?.await(token)
+            return
+        }
         val task = VisionChat(token)
         call = task
         requestGeometry = source.geometry
         onRecommendationStatus("正在推荐构图…")
-        handler.postDelayed(timeout, ((token.deadlineNs - SystemClock.elapsedRealtimeNanos() + 999_999L) /
-            1_000_000L).coerceAtLeast(0))
         network.execute {
             var sentAtMs = 0L
             val result = try {
@@ -397,6 +406,7 @@ internal class CameraSession(
 
     private fun cancelRecommendation() {
         requests.cancel()
+        observer?.pendingFrame?.await(null)
         handler.removeCallbacks(timeout)
         call?.cancel(network)
         call = null

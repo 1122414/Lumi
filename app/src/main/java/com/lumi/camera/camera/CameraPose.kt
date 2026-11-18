@@ -25,18 +25,22 @@ internal class CameraPose(context: Context, private val displayRotation: Int) : 
     private val samples = ArrayDeque<Pair<Long, Pose>>()
 
     fun start(): Boolean {
-        val sensor = manager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR) ?: return false
-        return manager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)
+        // A shot needs relative rotation. Magnetic heading can jump as an indoor compass recalibrates.
+        val relative = manager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+        if (relative != null && manager.registerListener(this, relative, SensorManager.SENSOR_DELAY_GAME)) return true
+        val absolute = manager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR) ?: return false
+        return manager.registerListener(this, absolute, SensorManager.SENSOR_DELAY_GAME)
     }
     fun close() = manager.unregisterListener(this)
 
     @Synchronized override fun onSensorChanged(e: SensorEvent) {
-        if (e.accuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
+        if (e.sensor.type != Sensor.TYPE_GAME_ROTATION_VECTOR && e.accuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
             samples.clear()
             return
         }
         val q = FloatArray(4)
         SensorManager.getQuaternionFromVector(q, e.values)
+        if (q.any { !it.isFinite() } || q.sumOf { it.toDouble()*it } !in 0.99..1.01) return
         val pose = Pose(q[0].toDouble(), q[1].toDouble(), q[2].toDouble(), q[3].toDouble())
         samples.addLast(e.timestamp to pose.forDisplay(displayRotation))
         if (samples.size > 64) samples.removeFirst()

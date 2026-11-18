@@ -21,7 +21,8 @@ import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.Uv
 import com.lumi.camera.shotplan.SelectedSubject
-import java.util.concurrent.atomic.AtomicReference
+import com.lumi.camera.shotplan.PendingRecommendationFrame
+import com.lumi.camera.shotplan.RequestToken
 
 internal data class FaceBox(val left: Double, val top: Double, val right: Double, val bottom: Double)
 internal data class SceneFrame(val sequence: Long, val capturedNs: Long, val geometry: FrameGeometry,
@@ -29,12 +30,13 @@ internal data class SceneFrame(val sequence: Long, val capturedNs: Long, val geo
     val pixels: SubjectPixels? = null, val follower: SubjectOutline? = null, val outline: SeenOutline? = null)
 
 internal class CompositionAnalyzer(context: Context, private val optics: CameraOptics, private val poses: CameraPose,
-    private val keepModelFrame: Boolean, private val deliver: (SceneFrame) -> Unit) : ImageAnalysis.Analyzer, AutoCloseable {
+    private val modelFrameReady: (RequestToken, RecommendationFrame) -> Unit,
+    private val deliver: (SceneFrame) -> Unit) : ImageAnalysis.Analyzer, AutoCloseable {
     private val segmenter = SubjectSegmenter(context.applicationContext)
     private val detector = FaceDetection.getClient(FaceDetectorOptions.Builder()
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).enableTracking().build())
     private var reportedFailure = false
-    private val modelFrame = AtomicReference<RecommendationFrame?>()
+    val pendingFrame = PendingRecommendationFrame()
 
     @Volatile var selected: SubjectOutline? = null
 
@@ -44,14 +46,12 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
         return SubjectOutline.from(observation, subject, pixels, segmenter::segment)
     }
 
-    // Taking transfers ownership; the analysis worker can immediately replace the slot.
-    fun takeModelFrame(): RecommendationFrame? = modelFrame.getAndSet(null)
-
     @androidx.annotation.OptIn(ExperimentalGetImage::class)
     override fun analyze(image: ImageProxy) {
         try {
             val ts = image.imageInfo.timestamp
             val captured = optics.captureTimeNs(ts)
+            val request = pendingFrame.forCapture(captured)
             val r = image.cropRect
             val frame = FrameGeometry(Extent(image.width, image.height), Crop(r.left, r.top, r.right, r.bottom),
                 image.imageInfo.rotationDegrees)
@@ -79,9 +79,9 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
                     }
                     val observation = Observation(captured, pose, lens, detected)
                     val follower = selected
-                    val pixels = if (keepModelFrame || follower != null) SubjectPixels.read(image, frame) else null
+                    val pixels = if (request != null || follower != null) SubjectPixels.read(image, frame) else null
                     val outline = if (follower != null && pixels != null) follower.observe(observation, pixels) else null
-                    val background = if (keepModelFrame || detected != null) Background.read(image, frame) else null
+                    val background = if (request != null || follower != null || detected != null) Background.read(image, frame) else null
                     SceneFrame(ts, captured, frame, observation, box, background, pixels, follower, outline)
                 }
             } catch (e: Exception) {
@@ -89,21 +89,20 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
                 reportedFailure = true
                 empty
             }
-            if (keepModelFrame) {
-                val next = if (result.pixels != null &&
-                    SystemClock.elapsedRealtimeNanos() - captured in 0..RotationGuidance.FRESH_NS) {
-                    try { RecommendationFrame(result, image.toBitmap()) } catch (_: RuntimeException) { null }
-                } else null
-                modelFrame.getAndSet(next)?.close()
-            }
             deliver(result)
+            if (request != null && result.pixels != null) {
+                val bitmap = try { image.toBitmap() } catch (_: RuntimeException) { return }
+                if (pendingFrame.claim(request, captured, SystemClock.elapsedRealtimeNanos())) {
+                    modelFrameReady(request, RecommendationFrame(result, bitmap))
+                } else bitmap.recycle()
+            }
         } finally {
             image.close()
         }
     }
 
     override fun close() {
-        takeModelFrame()?.close()
+        pendingFrame.await(null)
         detector.close()
         segmenter.close()
     }
