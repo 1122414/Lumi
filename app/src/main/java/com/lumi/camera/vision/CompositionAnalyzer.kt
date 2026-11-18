@@ -39,6 +39,7 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
     val pendingFrame = PendingRecommendationFrame()
 
     @Volatile var selected: SubjectOutline? = null
+    @Volatile var expectedZoom = 1f
 
     fun prepareSelection() = segmenter.prepare()
 
@@ -60,7 +61,7 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
             val empty = SceneFrame(ts, captured, frame, null, null, null)
             val result = try {
                 val pose = poses.at(captured)
-                val lens = optics.lens(image, frame)
+                val lens = optics.lens(image, frame, expectedZoom)
                 val media = image.image
                 if (media == null || pose == null || lens == null ||
                     SystemClock.elapsedRealtimeNanos() - captured !in 0..RotationGuidance.FRESH_NS) empty else {

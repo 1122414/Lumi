@@ -14,6 +14,7 @@ import android.view.View
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.Camera
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -54,6 +55,9 @@ internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: 
     val ring: Point? = null, val ready: Boolean = false, val merged: Boolean = false, val reason: String? = null,
     val outline: List<Point?> = emptyList(), val evidence: GuideEvidence = GuideEvidence.NO_OBSERVATION)
 
+internal data class ViewfinderZoom(val ratio: Float = 1f, val min: Float = 1f, val max: Float = 1f,
+    val changing: Boolean = false)
+
 internal class CameraSession(
     private val view: PreviewView,
     private val owner: LifecycleOwner,
@@ -61,6 +65,7 @@ internal class CameraSession(
     private val onBound: (Boolean) -> Unit,
     private val onMessage: (String) -> Unit,
     private val onRecommendationStatus: (String?) -> Unit,
+    private val onZoom: (ViewfinderZoom) -> Unit,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
     private data class Binding(val size: Extent, val rotation: Int)
     private val context = view.context
@@ -138,6 +143,14 @@ internal class CameraSession(
     private val frames = FrameGate()
     private var uses = emptyArray<UseCase>()
     private var capture: ImageCapture? = null
+    private var camera: Camera? = null
+    private val readings = FocalReadings()
+    private var zoom = ViewfinderZoom()
+    private var appliedZoom = 1f
+    private var desiredZoom = 1f
+    private var zoomGeneration = 0L
+    private var zoomSinceNs = 0L
+    private var logZoomFrame = true
     private var disposed = false
     private val drawDirection = object : Runnable {
         override fun run() {
@@ -187,7 +200,6 @@ internal class CameraSession(
         releaseBinding()
         val generation = frames.session
         val preview = Preview.Builder().setTargetRotation(rotation).build()
-        val readings = FocalReadings()
         val analysisBuilder = ImageAnalysis.Builder().setTargetRotation(rotation)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
         Camera2Interop.Extender(analysisBuilder).setSessionCaptureCallback(readings)
@@ -199,7 +211,11 @@ internal class CameraSession(
         uses = arrayOf(preview, analysis, photo)
         try {
             val camera = p.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
-            camera.cameraControl.setZoomRatio(1f)
+            this.camera = camera
+            val range = camera.cameraInfo.zoomState.value
+            zoom = ViewfinderZoom(1f, range?.minZoomRatio ?: 1f, range?.maxZoomRatio ?: 1f)
+            appliedZoom = 1f
+            onZoom(zoom)
             val sensors = CameraPose(context, rotation)
             poses = sensors
             if (!sensors.start()) onMessage("此设备的旋转矢量传感器不可用。")
@@ -213,6 +229,7 @@ internal class CameraSession(
             analysis.setAnalyzer(worker, analyzer)
             binding = next
             capture = photo
+            setZoom(desiredZoom)
             onBound(true)
         } catch (e: RuntimeException) {
             Log.e("LumiCamera", "Unable to bind rear camera", e)
@@ -222,6 +239,11 @@ internal class CameraSession(
     }
 
     private fun receive(frame: SceneFrame) {
+        if (zoom.changing || frame.capturedNs < zoomSinceNs) return
+        if (logZoomFrame && frame.observation != null && BuildConfig.DEBUG) {
+            Log.d("LumiZoom", "ratio=${zoom.ratio} min=${zoom.min} max=${zoom.max} fx=${frame.observation.lens.fx}")
+            logZoomFrame = false
+        }
         handler.removeCallbacks(expire)
         val now = SystemClock.elapsedRealtimeNanos()
         val age = now - frame.capturedNs
@@ -325,7 +347,7 @@ internal class CameraSession(
     }
 
     fun recommend() {
-        if (binding == null || VisionChat.unavailableReason != null) return
+        if (binding == null || zoom.changing || VisionChat.unavailableReason != null) return
         val now = SystemClock.elapsedRealtimeNanos()
         cancelRecommendation()
         run = null
@@ -453,7 +475,46 @@ internal class CameraSession(
         requestGeometry = null
     }
 
+    fun scaleZoom(factor: Float) = setZoom(zoom.ratio * factor)
+
+    fun setZoom(requested: Float) {
+        val camera = camera ?: return
+        if (!requested.isFinite()) return
+        val ratio = requested.coerceIn(zoom.min, zoom.max)
+        if (ratio == zoom.ratio) return
+        val generation = ++zoomGeneration
+        desiredZoom = ratio
+        zoom = zoom.copy(ratio = ratio, changing = true)
+        onZoom(zoom)
+        cancelRecommendation()
+        view.removeCallbacks(drawDirection)
+        handler.removeCallbacks(expire)
+        latest = null
+        run = null
+        selection = null
+        observer?.apply { selected = null; expectedZoom = ratio }
+        onFrame(Viewfinder())
+        onRecommendationStatus(null)
+        val operation = camera.cameraControl.setZoomRatio(ratio)
+        operation.addListener({
+            if (generation != zoomGeneration) return@addListener
+            try {
+                operation.get()
+                appliedZoom = ratio
+            } catch (_: java.util.concurrent.ExecutionException) {
+                desiredZoom = appliedZoom
+                observer?.expectedZoom = appliedZoom
+                onMessage("相机未能切换倍率")
+            }
+            zoomSinceNs = SystemClock.elapsedRealtimeNanos()
+            logZoomFrame = true
+            zoom = zoom.copy(ratio = appliedZoom, changing = false)
+            onZoom(zoom)
+        }, main)
+    }
+
     fun save() {
+        if (zoom.changing) return
         val photo = capture ?: return
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "Lumi_${System.currentTimeMillis()}.jpg")
@@ -476,6 +537,12 @@ internal class CameraSession(
     }
 
     private fun releaseBinding() {
+        zoomGeneration++
+        zoomSinceNs = 0L
+        logZoomFrame = true
+        camera = null
+        zoom = ViewfinderZoom()
+        onZoom(zoom)
         view.removeCallbacks(drawDirection)
         frames.reset()
         cancelRecommendation()

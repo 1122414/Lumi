@@ -10,6 +10,8 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.graphics.Rect
+import android.os.Build
 import android.os.SystemClock
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
@@ -61,6 +63,7 @@ internal class CameraOptics(info: CameraInfo, private val readings: FocalReading
     private val physical = meta.getCameraCharacteristic(C.SENSOR_INFO_PHYSICAL_SIZE)
     private val pixels = meta.getCameraCharacteristic(C.SENSOR_INFO_PIXEL_ARRAY_SIZE)
     private val active = meta.getCameraCharacteristic(C.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+    private val ratioControl = Build.VERSION.SDK_INT >= 30 && meta.getCameraCharacteristic(C.CONTROL_ZOOM_RATIO_RANGE) != null
     private val realtime = meta.getCameraCharacteristic(C.SENSOR_INFO_TIMESTAMP_SOURCE) ==
         C.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
 
@@ -69,11 +72,11 @@ internal class CameraOptics(info: CameraInfo, private val readings: FocalReading
         return if (realtime) timestamp else timestamp + (SystemClock.elapsedRealtimeNanos() - System.nanoTime())
     }
 
-    fun lens(image: ImageProxy, geometry: FrameGeometry): Lens? {
-        val mm = readings.at(image.imageInfo.timestamp) ?: focals?.singleOrNull() ?: return null
+    fun lens(image: ImageProxy, geometry: FrameGeometry, zoom: Float): Lens? {
         val sensor = physical ?: return null
         val px = pixels ?: return null
         val area = active ?: return null
+        val mm = readings.effectiveFocal(image.imageInfo.timestamp, zoom, area, ratioControl, focals?.singleOrNull()) ?: return null
         if (mm <= 0 || sensor.width <= 0 || sensor.height <= 0) return null
         val m = image.imageInfo.sensorToBufferTransformMatrix
         val axes = floatArrayOf(mm * px.width / sensor.width, 0f, 0f, mm * px.height / sensor.height)
@@ -92,16 +95,34 @@ internal class CameraOptics(info: CameraInfo, private val readings: FocalReading
     }
 }
 
-// Some 1× logical cameras advertise several focal lengths. Don't guess which is in use.
+// CameraX's buffer transform describes the bound stream. HAL zoom changes the
+// field of view within that stream, including across physical-lens switches.
 internal class FocalReadings : CameraCaptureSession.CaptureCallback() {
-    private val values = LinkedHashMap<Long, Float>()
+    private data class Reading(val mm: Float?, val zoom: Float?, val crop: Rect?)
+    private val values = LinkedHashMap<Long, Reading>()
+    private var unitFocal: Float? = null
 
     @Synchronized override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest,
         result: TotalCaptureResult) {
         val time = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
-        values[time] = result.get(CaptureResult.LENS_FOCAL_LENGTH) ?: return
+        val ratio = if (Build.VERSION.SDK_INT >= 30) result.get(CaptureResult.CONTROL_ZOOM_RATIO) else null
+        values[time] = Reading(result.get(CaptureResult.LENS_FOCAL_LENGTH), ratio, result.get(CaptureResult.SCALER_CROP_REGION))
         if (values.size > 32) values.remove(values.keys.first())
     }
 
-    @Synchronized fun at(time: Long) = values[time]
+    @Synchronized fun effectiveFocal(time: Long, requested: Float, active: Rect, ratioControl: Boolean, singleFocal: Float?): Float? {
+        val frame = values[time] ?: return null
+        val applied = frame.zoom?.takeIf { ratioControl } ?: frame.crop?.let { crop ->
+            minOf(active.width().toFloat()/crop.width(), active.height().toFloat()/crop.height())
+        } ?: 1f
+        if (abs(applied-1f) < 0.001f && frame.mm != null) unitFocal = frame.mm
+        return zoomedFocal(unitFocal ?: singleFocal, applied, requested)
+    }
+}
+
+internal fun zoomedFocal(unitFocal: Float?, applied: Float, requested: Float): Float? {
+    if (unitFocal == null || !unitFocal.isFinite() || unitFocal <= 0 || !requested.isFinite() || requested <= 0 ||
+        !applied.isFinite() || applied <= 0 ||
+        abs(applied-requested) > requested*0.005f) return null
+    return unitFocal * applied
 }

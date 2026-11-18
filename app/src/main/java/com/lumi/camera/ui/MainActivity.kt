@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -25,6 +26,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -33,6 +35,7 @@ import com.lumi.camera.BuildConfig
 import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.Viewfinder
+import com.lumi.camera.camera.ViewfinderZoom
 import com.lumi.camera.camera.Point
 import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.shotplan.VisionChat
@@ -102,12 +105,13 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
     var frame by remember { mutableStateOf(Viewfinder()) }
     var paintRing by remember { mutableStateOf<Point?>(null) }
     var bound by remember { mutableStateOf(false) }
+    var zoom by remember { mutableStateOf(ViewfinderZoom()) }
     var recommendationStatus by remember { mutableStateOf<String?>(null) }
     val session = remember(preview, owner) {
         CameraSession(preview, owner, { next ->
             frame = next
             if (next.ring != null || !next.hasTarget) paintRing = next.ring
-        }, { bound = it }, onMessage, { recommendationStatus = it })
+        }, { bound = it }, onMessage, { recommendationStatus = it }, { zoom = it })
     }
     DisposableEffect(session) {
         onSession(session)
@@ -126,12 +130,13 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
     val showRing = frame.ring != null && !(frame.merged && settled)
     val alpha by animateFloatAsState(if (showRing) 1f else 0f,
         if (showRing) snap() else tween(120), label = "ring visibility")
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val controlsHeight = minOf(90.dp, maxHeight * 0.24f)
-        Box(Modifier.fillMaxSize().padding(vertical = controlsHeight), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().padding(top = 48.dp, bottom = 132.dp), contentAlignment = Alignment.Center) {
             Box(Modifier.aspectRatio(3f / 4f).background(Color.Black)) {
                 AndroidView({ preview }, Modifier.matchParentSize())
-                Canvas(Modifier.matchParentSize().clipToBounds()) {
+                Canvas(Modifier.matchParentSize().clipToBounds().pointerInput(session) {
+                    detectTransformGestures { _, _, scale, _ -> if (scale != 1f) session.scaleZoom(scale) }
+                }) {
                     val points = frame.outline
                     if (points.isNotEmpty()) {
                         val path = Path()
@@ -185,6 +190,7 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
             }
         }
         Column(Modifier.align(Alignment.BottomCenter), horizontalAlignment = Alignment.CenterHorizontally) {
+            if (bound && zoom.max > zoom.min) ZoomControls(zoom, session::setZoom)
             frame.reason?.let { Text(it, color = Color.White, fontSize = 16.sp, maxLines = 1) }
             VisionChat.unavailableReason?.let { Text(it, color = Color.LightGray, fontSize = 12.sp) }
             Text(when {
@@ -197,9 +203,24 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
                 else -> "对准想拍的人或物"
             }, color = Color.White, fontSize = 14.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(session::recommend, enabled = bound && VisionChat.unavailableReason == null) { Text("推荐构图") }
-                OutlinedButton(onShoot, enabled = bound) { Text("拍照并保存") }
+                Button(session::recommend, enabled = bound && !zoom.changing && VisionChat.unavailableReason == null) { Text("推荐构图") }
+                OutlinedButton(onShoot, enabled = bound && !zoom.changing) { Text("拍照并保存") }
             }
         }
+    }
+}
+
+@Composable
+private fun ZoomControls(zoom: ViewfinderZoom, select: (Float) -> Unit) {
+    val stops = remember(zoom.min, zoom.max) {
+        (listOf(zoom.min, 1f, 2f, 3f).filter { it in zoom.min..zoom.max } +
+            listOfNotNull(zoom.max.takeIf { it < 2f })).distinct().sorted()
+    }
+    fun label(value: Float) = String.format(java.util.Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.') + "×"
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        for (stop in stops) {
+            FilterChip(selected = abs(stop - zoom.ratio) < 0.005f, onClick = { select(stop) }, label = { Text(label(stop)) })
+        }
+        if (stops.none { abs(it - zoom.ratio) < 0.005f }) Text(label(zoom.ratio), color = Color.White, fontSize = 14.sp)
     }
 }
