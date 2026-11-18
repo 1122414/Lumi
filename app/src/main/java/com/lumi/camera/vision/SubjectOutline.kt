@@ -20,6 +20,7 @@ internal class SubjectOutline private constructor(private val source: Observatio
     private val original: ForegroundMask, private val sourceRegion: FaceBox, private val selection: List<Uv>, private val referenceComplete: Boolean, private val samples: List<Sample>, private val segment: SegmentAt) {
     private data class Sample(val p: Uv, val color: Int)
     val bounds get() = original.bounds
+    val hasFullCaptureContour = referenceComplete && original.points.none { it == null }
     fun containsAtCapture(p: Uv) = original.contains(p)
     private var lastSeed = seed
     private var lastScale = 1.0

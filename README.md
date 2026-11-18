@@ -6,7 +6,7 @@
 
 前景分割在手机上运行，使用 MediaPipe Tasks Vision 0.10.35 和随应用打包的 Google Magic Touch v1 模型。模型大小 6,227,884 字节，SHA-256 为 `e24338a717c1b7ad8d159666677ef400babb7f33b8ad60c4d96db4ecf694cd25`。[模型来源](https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite) · [Google 模型卡](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MagicTouch.pdf) · [Apache 2.0 许可](app/src/main/assets/magic_touch.LICENSE.txt)
 
-推荐图仅在内存中处理。再次点推荐会替换上次请求；超时（20 秒）、无可信结果或推荐画面会裁掉选中的主体时，不显示推荐环。退到后台或相机会话重建后需重新推荐。开发者可在 debug 版右上角点「调试」，选择「记住这个构图」离线检查绿环。
+推荐图仅在内存中处理。模型可以推荐保留当前构图，此时目标就在白点处，仍需核对画面并停稳。方案被拒绝时，快门上方会显示具体原因，例如「模型对这次构图把握不足」或「推荐角度会裁掉主体」。请求期限为 20 秒，再次点推荐会替换上次请求。退到后台或相机会话重建后需重新推荐。开发者可在 debug 版右上角点「调试」，选择「记住这个构图」离线检查绿环。
 
 ## 本地配置（仅 debug）
 

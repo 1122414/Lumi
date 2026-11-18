@@ -8,6 +8,9 @@ import kotlin.math.tan
 import org.junit.Assert.*
 import org.junit.Test
 
+private val ModelReply.plan get() = (decision as? PlanResult.Accepted)?.value
+internal fun validatedPlan(fields: Map<String, Any?>) = ModelReply.from(fields, complete = true)?.plan
+
 class RecommendationTest {
     private val source = Observation(10L, Pose(1.0, 0.0, 0.0, 0.0), Lens(1.1, 0.9, 0.5, 0.5),
         SubjectPosition(7, Uv(0.55, 0.48), 0.14))
@@ -26,7 +29,7 @@ class RecommendationTest {
     @Test fun centerRightAndUpUseTheSentUprightViewIncludingAnOffCenterLens() {
         val from = source.copy(lens = source.lens.copy(cx = 0.47, cy = 0.53))
         for (aim in listOf(Uv.CENTER, Uv(0.68, 0.5), Uv(0.5, 0.32), Uv(0.62, 0.39))) {
-            val target = Recommendation.validated(fields(aim.x, aim.y))!!.targetFrom(from, box)!!
+            val target = validatedPlan(fields(aim.x, aim.y))!!.targetFrom(from, box)!!
             val guide = RotationGuidance(target).update(from, from.timeNs, true)
             checkPoint(aim, guide.ring)
             assertFalse("a model verdict never skips settling", guide.ready)
@@ -38,7 +41,7 @@ class RecommendationTest {
         fun yaw(a: Double) = Pose(cos(a/2), 0.0, -sin(a/2), 0.0)
         val sent = source.copy(pose = yaw(0.7))
         val aimX = 0.5 + sent.lens.fx * tan(angle)
-        val target = Recommendation.validated(fields(aimX, 0.5))!!.targetFrom(sent, box)!!
+        val target = validatedPlan(fields(aimX, 0.5))!!.targetFrom(sent, box)!!
         val turned = sent.copy(timeNs = 5_000_000_000, pose = sent.pose * yaw(angle))
         val face = sent.subject!!
         val actual = turned.copy(subject = face.copy(center = RotationProjection(sent, turned).project(face.center)!!))
@@ -57,7 +60,7 @@ class RecommendationTest {
             val half = Math.toRadians(degrees) / 2
             return Pose(cos(half), 0.0, -sin(half), 0.0)
         }
-        val target = Recommendation.validated(fields(0.5 + source.lens.fx * tan(Math.toRadians(8.0)), 0.5))!!
+        val target = validatedPlan(fields(0.5 + source.lens.fx * tan(Math.toRadians(8.0)), 0.5))!!
             .targetFrom(source, box)!!
         for (angle in listOf(3.0, 12.0)) {
             val turned = source.copy(timeNs = 9_000_000_000L, pose = source.pose * yaw(angle))
@@ -71,18 +74,34 @@ class RecommendationTest {
 
     @Test fun rejectsMissingExtraWrongTypeOutOfBoundsLowConfidenceAndContradictoryFields() {
         val valid = fields()
-        for (key in valid.keys) assertNull(Recommendation.validated(valid - key))
+        for (key in valid.keys) assertNull(validatedPlan(valid - key))
         for (change in listOf("extra" to 1, "aimPoint" to mapOf("x" to 0.5),
             "aimPoint" to mapOf("x" to 0.5, "y" to -0.01), "aimPoint" to mapOf("x" to "0.5", "y" to 0.5),
             "confidence" to 0.69, "confidence" to 1.01, "confidence" to Double.NaN, "confidence" to "0.9",
             "alreadyGood" to "true", "reason" to "", "reason" to 3)) {
-            assertNull(change.first, Recommendation.validated(valid + change))
+            assertNull(change.first, validatedPlan(valid + change))
         }
-        assertNull(Recommendation.validated(fields(0.55, 0.5) + ("alreadyGood" to true)))
+        assertNull(validatedPlan(fields(0.55, 0.5) + ("alreadyGood" to true)))
+    }
+
+    @Test fun reportsWhyAnIdentifiedSubjectCannotStartGuidance() {
+        val ambiguous = fields(0.5, 0.46) + mapOf("alreadyGood" to true, "confidence" to 0.82)
+        for ((data, expected) in listOf(ambiguous to PlanProblem.CONFLICTING_AIM,
+            fields() - "reason" to PlanProblem.INVALID_FIELDS,
+            fields(1.01, 0.5) to PlanProblem.INVALID_AIM,
+            fields() + ("confidence" to 0.69) to PlanProblem.LOW_CONFIDENCE)) {
+            val reply = ModelReply.from(data, complete = true)!!
+            assertNotNull(reply.subject)
+            assertEquals(PlanResult.Rejected(expected), reply.decision)
+        }
+        assertEquals(PlanResult.Rejected(PlanProblem.INCOMPLETE), ModelReply.from(fields(), complete = false)!!.decision)
+        val keep = validatedPlan(fields() + ("confidence" to 0.90))!!
+        assertEquals(Uv.CENTER, keep.aimPoint)
+        assertSame(source, keep.targetFrom(source, box))
     }
 
     @Test fun bottomCaptionKeepsShortReasonsAndFitsTenUnicodeCharacters() {
-        fun caption(reason: String) = Recommendation.validated(fields() + ("reason" to reason))!!.caption
+        fun caption(reason: String) = validatedPlan(fields() + ("reason" to reason))!!.caption
         assertEquals("玩偶·视线前方留白", caption("视线前方留白"))
         assertEquals("玩偶突出", caption("主体突出，背景的线条更干净"))
         assertEquals("玩偶·窗边的光线衬…", caption("窗边的光线衬托出了玩偶的笑容"))
@@ -138,7 +157,7 @@ class RecommendationTest {
 
     @Test fun aVisibleCenterDoesNotExcuseClippingTheFaceAtItsCorner() {
         val left = source.copy(subject = SubjectPosition(8, Uv(0.19, 0.5), 0.26))
-        val plan = Recommendation.validated(fields(0.60, 0.5))!!
+        val plan = validatedPlan(fields(0.60, 0.5))!!
         val smaller = plan.targetFrom(left, FaceBox(0.18, 0.48, 0.20, 0.52))
         assertNotNull(smaller)
         assertNull(plan.targetFrom(left, FaceBox(0.06, 0.38, 0.32, 0.62)))

@@ -23,6 +23,7 @@ import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -35,6 +36,8 @@ import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.shotplan.ModelFailure
 import com.lumi.camera.shotplan.ModelReply
+import com.lumi.camera.shotplan.PlanProblem
+import com.lumi.camera.shotplan.PlanResult
 import com.lumi.camera.shotplan.RecommendationRequests
 import com.lumi.camera.shotplan.RememberedComposition
 import com.lumi.camera.shotplan.RequestToken
@@ -387,22 +390,38 @@ internal class CameraSession(
             return
         }
         selection = Selection(reply.name, source.geometry, outline)
-        val plan = reply.plan
-        val target = if (plan != null && outline != null) RememberedComposition.from(source, plan, outline) else null
-        if (plan == null || target == null) {
+        fun reject(problem: PlanProblem) {
             observer?.selected = outline
             view.removeCallbacks(drawDirection)
             if (outline != null) view.postOnAnimation(drawDirection)
-            Log.i("LumiRecommendation", "modelMs=$elapsedMs identified=true modelOutline=${reply.subject != null} " +
-                "modelPlan=${plan != null} outline=${outline != null} plan=false")
-            onRecommendationStatus(if (outline == null) "主体边缘暂未确认" else "已识别主体，暂无可信构图")
+            recordDecision(problem.name, elapsedMs)
+            onRecommendationStatus(problem.notice)
             render()
-            return
         }
+        val plan = when (val decision = reply.decision) {
+            is PlanResult.Accepted -> decision.value
+            is PlanResult.Rejected -> return reject(decision.problem)
+        }
+        val target = when (val decision = RememberedComposition.recommended(source, plan, outline)) {
+            is PlanResult.Accepted -> decision.value
+            is PlanResult.Rejected -> return reject(decision.problem)
+        }
+        recordDecision("ACCEPTED", elapsedMs)
         Log.i("LumiRecommendation", "modelMs=$elapsedMs aimPoint=(${plan.aimPoint.x},${plan.aimPoint.y}) " +
             "confidence=${plan.confidence} alreadyGood=${plan.alreadyGood} reason=" + VisionChat.logReason(plan.reason))
         onRecommendationStatus(null)
         startGuide(target, plan.caption)
+    }
+
+    private fun recordDecision(outcome: String, modelMs: Long) {
+        if (!BuildConfig.DEBUG) return
+        val summary = "${System.currentTimeMillis()} outcome=$outcome modelMs=$modelMs"
+        Log.i("LumiRecommendation", summary)
+        val history = context.getSharedPreferences("recommendation_outcomes", Context.MODE_PRIVATE)
+        history.edit {
+            putString("previous", history.getString("latest", null))
+            putString("latest", summary)
+        }
     }
 
     private fun cancelRecommendation() {
