@@ -164,6 +164,7 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
             }
         }
         Column(Modifier.align(Alignment.BottomCenter), horizontalAlignment = Alignment.CenterHorizontally) {
+            frame.reason?.let { Text(it, color = Color.White, fontSize = 16.sp, maxLines = 1) }
             VisionChat.unavailableReason?.let { Text(it, color = Color.LightGray, fontSize = 12.sp) }
             Text(when {
                 frame.ready -> "可以拍"

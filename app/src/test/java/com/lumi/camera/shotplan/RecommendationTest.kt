@@ -79,6 +79,14 @@ class RecommendationTest {
         assertNull(Recommendation.validated(fields(0.55, 0.5) + ("alreadyGood" to true)))
     }
 
+    @Test fun bottomCaptionKeepsShortReasonsAndFitsTenUnicodeCharacters() {
+        fun caption(reason: String) = Recommendation.validated(fields() + ("reason" to reason))!!.caption
+        assertEquals("视线前方留白", caption("视线前方留白"))
+        assertEquals("人物突出", caption("人物突出，背景的线条更干净"))
+        assertEquals("视".repeat(9) + "𠮷", caption("视".repeat(9) + "𠮷"))
+        assertEquals("视".repeat(8) + "𠮷…", caption("视".repeat(8) + "𠮷留白"))
+    }
+
     @Test fun modelTextMustUseJsonBooleansNumbersAndStringEscapes() {
         val example = """{"aimPoint":{"x":0.5,"y":5e-1},"confidence":1,"alreadyGood":true,"reason":"人物与\u80cc景。"}"""
         assertTrue(Recommendation.hasJsonTokens(example))

@@ -23,6 +23,46 @@ class RotationGuidanceTest {
         Observation(ms * 1_000_000L, pose, lens, face.copy(center = uv))
     private fun RotationGuidance.feed(o: Observation) = update(o, o.timeNs, true)
 
+    @Test fun returnBearingSurvivesTheSideAndRearHemisphereWithoutAFaceOrCameraFrame() {
+        for (sign in listOf(1.0, -1.0)) {
+            val direction = ReturnDirection(target)
+            for (angle in listOf(45.0, 89.9, 90.0, 135.0, 179.7, 180.0, 179.9, 120.0, 45.0)) {
+                val g = direction.display(Guide(null), null, right(sign * angle))
+                assertEquals(if (sign > 0) 0.0 else 1.0, g.ring!!.x, 1e-8)
+                assertEquals(0.5, g.ring.y, 1e-8)
+                assertFalse(g.ready)
+            }
+            val inside = direction.display(Guide(null), null, right(sign * 12.0))
+            assertEquals(0.5 - lens.fx * tan(Math.toRadians(sign * 12)), inside.ring!!.x, 1e-6)
+            assertNull(direction.display(Guide(null), null, origin).ring)
+            assertNull(direction.display(Guide(null), null, null).ring)
+        }
+    }
+
+    @Test fun verticalReturnPointsToTheEdgeAndNeverReusesAReadyFrame() {
+        val direction = ReturnDirection(target)
+        val ready = Guide(Uv.CENTER, true, GuideEvidence.CONFIRMED)
+        for (angle in listOf(85.0, 120.0, -95.0)) {
+            val g = direction.display(ready, target, pitch(angle))
+            assertEquals(0.5, g.ring!!.x, 1e-8)
+            assertEquals(if (angle > 0) 1.0 else 0.0, g.ring.y, 1e-8)
+            assertFalse(g.ready)
+            assertFalse(g.merged)
+        }
+        assertEquals(ready, direction.display(ready, target, origin))
+    }
+
+    @Test fun worldDirectionUsesTheRecommendedPoseAndTurnsTheOtherWayAfterPassingTheAntipode() {
+        val start = right(65.0) * pitch(13.0)
+        val direction = ReturnDirection(target.copy(pose = start, lens = lens.copy(cx = 0.46, cy = 0.52)))
+        val lost = Guide(null)
+        val a = direction.display(lost, null, start * right(120.0))
+        val b = direction.display(lost, null, start * right(235.0))
+        assertEquals(0.0, a.ring!!.x, 1e-8)
+        assertEquals(1.0, b.ring!!.x, 1e-8)
+        assertNull(direction.display(lost, null, start).ring)
+    }
+
     @Test fun aimingRightMovesRingLeftAndAimingUpMovesItDown() {
         val d = tan(Math.toRadians(12.0))
         for ((pose, expected) in listOf(right(12.0) to Uv(0.5 - lens.fx*d, 0.5),

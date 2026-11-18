@@ -13,6 +13,12 @@ import kotlin.math.sin
 internal class Recommendation private constructor(
     val aimPoint: Uv, val confidence: Double, val alreadyGood: Boolean, val reason: String,
 ) {
+    val caption: String = if (reason.codePointCount(0, reason.length) <= 10) reason else {
+        val clause = reason.takeWhile { it !in "，。；！？、,;.!?" }.trim()
+        if (clause.isNotEmpty() && clause.codePointCount(0, clause.length) <= 10) clause
+        else reason.substring(0, reason.offsetByCodePoints(0, 9)) + "…"
+    }
+
     companion object {
         // Android JsonReader also accepts e.g. TRUE and non-JSON string escapes in strict mode.
         private val jsonToken = java.util.regex.Pattern.compile(

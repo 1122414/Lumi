@@ -29,6 +29,7 @@ import androidx.lifecycle.LifecycleOwner
 import com.lumi.camera.BuildConfig
 import com.lumi.camera.guidance.Guide
 import com.lumi.camera.guidance.GuideEvidence
+import com.lumi.camera.guidance.ReturnDirection
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.shotplan.ModelFailure
@@ -43,7 +44,7 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
 
 internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: Boolean = false,
-    val ring: Point? = null, val ready: Boolean = false, val merged: Boolean = false)
+    val ring: Point? = null, val ready: Boolean = false, val merged: Boolean = false, val reason: String? = null)
 
 internal class CameraSession(
     private val view: PreviewView,
@@ -70,8 +71,10 @@ internal class CameraSession(
     }
     private val future = ProcessCameraProvider.getInstance(context)
     private val displays = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-    private class Run(val target: RememberedComposition) {
+    private class Run(val target: RememberedComposition, val reason: String?) {
         val guidance = RotationGuidance(target.observation)
+        val direction = ReturnDirection(target.observation)
+        var visual = Guide(null)
         private var lastEvidence: GuideEvidence? = null
         private var lastReady = false
         private var lastLogNs = 0L
@@ -95,13 +98,17 @@ internal class CameraSession(
     private var uses = emptyArray<UseCase>()
     private var capture: ImageCapture? = null
     private var disposed = false
+    private val drawDirection = object : Runnable {
+        override fun run() {
+            if (this@CameraSession.run == null || binding == null) return
+            render()
+            view.postOnAnimation(this)
+        }
+    }
     private val expire = Runnable {
         latest = null
-        run?.let { active ->
-            val guide = active.guidance.lost(GuideEvidence.STALE)
-            active.trace(guide, SystemClock.elapsedRealtimeNanos())
-        }
-        onFrame(Viewfinder(hasTarget = run != null))
+        run?.let { it.visual = it.guidance.lost(GuideEvidence.STALE) }
+        render()
     }
     private val layout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> bind() }
 
@@ -158,7 +165,7 @@ internal class CameraSession(
             val analyzer = CompositionAnalyzer(CameraOptics(camera.cameraInfo, readings), sensors,
                 keepModelFrame = VisionChat.unavailableReason == null) { result ->
                 main.execute {
-                    if (frames.accept(generation, 0, result.sequence)) receive(result, next.size)
+                    if (frames.accept(generation, 0, result.sequence)) receive(result)
                 }
             }
             observer = analyzer
@@ -173,7 +180,7 @@ internal class CameraSession(
         }
     }
 
-    private fun receive(frame: SceneFrame, size: Extent) {
+    private fun receive(frame: SceneFrame) {
         handler.removeCallbacks(expire)
         val now = SystemClock.elapsedRealtimeNanos()
         val age = now - frame.capturedNs
@@ -189,20 +196,47 @@ internal class CameraSession(
         latest = frame
         val current = frame.observation
         val t = run
-        val guide = if (t == null || current == null) {
-            t?.guidance?.lost() ?: Guide(null)
-        } else {
-            val agrees = frame.background?.agrees(t.target.marks, RotationProjection(t.target.backgroundSource, current)) == true
-            t.guidance.update(current, now, agrees)
+        if (t != null) {
+            t.visual = if (current == null) t.guidance.lost() else {
+                val agrees = frame.background?.agrees(t.target.marks, RotationProjection(t.target.backgroundSource, current)) == true
+                t.guidance.update(current, now, agrees)
+            }
         }
-        t?.trace(guide, now)
+        render()
+        handler.postDelayed(expire, (RotationGuidance.FRESH_NS - age) / 1_000_000L + 1)
+    }
+
+    private fun render() {
+        val size = binding?.size ?: return
+        val now = SystemClock.elapsedRealtimeNanos()
+        val fresh = latest?.takeIf { now - it.capturedNs in 0..RotationGuidance.FRESH_NS }
+        val current = fresh?.observation
+        val active = run
+        if (active == null) {
+            onFrame(Viewfinder(canRemember = current?.face != null))
+            return
+        }
+        val visual = if (fresh != null) active.visual else Guide(null, evidence = GuideEvidence.STALE)
+        val guide = active.direction.display(visual, current, poses?.latestAt(now))
+        if (guide.evidence == GuideEvidence.RETURN_DIRECTION && (visual.ready || visual.merged)) {
+            active.visual = active.guidance.lost()
+        }
+        active.trace(guide, now)
+        val geometry = active.target.geometry
         val ring = guide.ring?.let {
-            val ref = frame.geometry.referenceSize
-            FrameMapping(frame.geometry, size).referenceToPreview(
+            val ref = geometry.referenceSize
+            FrameMapping(geometry, size).referenceToPreview(
                 Point((it.x * ref.width).toFloat(), (it.y * ref.height).toFloat()))
         }
-        onFrame(Viewfinder(current?.face != null, t != null, ring, guide.ready, guide.merged))
-        handler.postDelayed(expire, (RotationGuidance.FRESH_NS - age) / 1_000_000L + 1)
+        onFrame(Viewfinder(current?.face != null, true, ring, guide.ready, guide.merged, active.reason))
+    }
+
+    private fun startGuide(target: RememberedComposition, reason: String? = null) {
+        run = Run(target, reason)
+        view.removeCallbacks(drawDirection)
+        view.postOnAnimation(drawDirection)
+        val frame = latest
+        if (frame == null) render() else receive(frame)
     }
 
     fun rememberComposition() {
@@ -220,8 +254,7 @@ internal class CameraSession(
         val target = RememberedComposition.from(frame) ?: return
         cancelRecommendation()
         onRecommendationStatus(null)
-        run = Run(target)
-        binding?.let { receive(frame, it.size) }
+        startGuide(target)
     }
 
     fun recommend() {
@@ -283,11 +316,8 @@ internal class CameraSession(
             onRecommendationStatus("推荐构图无法完整保留人脸，请重新推荐。")
             return
         }
-        run = Run(target)
         onRecommendationStatus(null)
-        val current = latest
-        val size = binding?.size ?: return
-        if (current == null) onFrame(Viewfinder(hasTarget = true)) else receive(current, size)
+        startGuide(target, plan.caption)
     }
 
     private fun cancelRecommendation() {
@@ -321,6 +351,7 @@ internal class CameraSession(
     }
 
     private fun releaseBinding() {
+        view.removeCallbacks(drawDirection)
         frames.reset()
         cancelRecommendation()
         onRecommendationStatus(null)

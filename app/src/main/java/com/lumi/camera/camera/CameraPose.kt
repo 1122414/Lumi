@@ -45,6 +45,9 @@ internal class CameraPose(context: Context, private val displayRotation: Int) : 
 
     @Synchronized fun at(timeNs: Long): Pose? = samples.minByOrNull { abs(it.first - timeNs) }
         ?.takeIf { abs(it.first - timeNs) <= 60_000_000L }?.second
+
+    @Synchronized fun latestAt(nowNs: Long): Pose? =
+        samples.lastOrNull()?.takeIf { nowNs - it.first in 0..60_000_000L }?.second
 }
 
 @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)

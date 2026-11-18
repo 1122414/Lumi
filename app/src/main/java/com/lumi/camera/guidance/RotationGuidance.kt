@@ -36,19 +36,55 @@ internal class RotationProjection(target: Observation, current: Observation) {
     private val a = target.lens
     private val b = current.lens
     private val rotation = current.pose.inverse() * target.pose
-    fun project(point: Uv): Uv? {
+    private fun rayInCurrentView(point: Uv): Pose {
         val ray = Pose(0.0, (point.x - a.cx) / a.fx, (a.cy - point.y) / a.fy, -1.0)
-        val v = rotation * ray * rotation.inverse()
+        return rotation * ray * rotation.inverse()
+    }
+
+    fun project(point: Uv): Uv? {
+        val v = rayInCurrentView(point)
         if (v.z >= -0.05) return null
         return Uv(b.cx + b.fx * v.x / -v.z, b.cy - b.fy * v.y / -v.z)
     }
+
+    fun onView(point: Uv, previousEdge: Uv): Uv {
+        val v = rayInCurrentView(point)
+        val depth = -v.z
+        val dx = b.fx * v.x + (b.cx - 0.5) * depth
+        val dy = -b.fy * v.y + (b.cy - 0.5) * depth
+        val extent = maxOf(abs(dx), abs(dy))
+        // At the antipode either way around is valid. Keep the arrival side through sensor noise.
+        if (depth < 0 && extent < 0.05 * -depth) return previousEdge
+        val divisor = maxOf(depth, 2 * extent)
+        return Uv(0.5 + dx / divisor, 0.5 + dy / divisor)
+    }
 }
 
-internal enum class GuideEvidence { CONFIRMED, BACKGROUND_UNCERTAIN, FACE_GAP, NO_FACE, OTHER_FACE, MISMATCH, NO_OBSERVATION, STALE }
+internal enum class GuideEvidence { CONFIRMED, BACKGROUND_UNCERTAIN, FACE_GAP, NO_FACE, OTHER_FACE, MISMATCH, NO_OBSERVATION, STALE, RETURN_DIRECTION }
 
 internal data class Guide(val ring: Uv?, val ready: Boolean = false,
     val evidence: GuideEvidence = GuideEvidence.NO_OBSERVATION, val merged: Boolean = ready) {
     val trusted get() = evidence == GuideEvidence.CONFIRMED
+}
+
+internal class ReturnDirection(private val target: Observation) {
+    private var previousEdge = Uv(1.0, 0.5)
+
+    fun display(visual: Guide, observed: Observation?, livePose: Pose?): Guide {
+        val pose = livePose ?: observed?.pose ?: return visual
+        val live = target.copy(pose = pose, lens = observed?.lens ?: target.lens)
+        val goal = RotationProjection(target, live).onView(Uv.CENTER, previousEdge)
+        val atEdge = maxOf(abs(goal.x - 0.5), abs(goal.y - 0.5)) >= 0.499999
+        if (atEdge) previousEdge = goal
+        if (atEdge || (goal.distance(Uv.CENTER) > 0.045 && (visual.ring == null || visual.merged || visual.ready))) {
+            return Guide(goal, evidence = GuideEvidence.RETURN_DIRECTION)
+        }
+        if (observed != null && visual.ring != null && !visual.merged && !visual.ready) {
+            val ring = RotationProjection(observed, live).onView(visual.ring, previousEdge)
+            return visual.copy(ring = ring)
+        }
+        return visual
+    }
 }
 
 internal class RotationGuidance(private val target: Observation) {
