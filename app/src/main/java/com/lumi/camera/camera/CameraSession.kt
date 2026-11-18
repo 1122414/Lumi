@@ -58,24 +58,7 @@ internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: 
     val outline: List<Point?> = emptyList(), val evidence: GuideEvidence = GuideEvidence.NO_OBSERVATION)
 
 internal data class ViewfinderZoom(val ratio: Float = 1f, val min: Float = 1f, val max: Float = 1f,
-    val changing: Boolean = false) {
-    fun shortcuts(): List<Float> {
-        if (min == max) return listOf(min)
-        val stops = sortedSetOf(min, max)
-        fun addBetween(value: Float) {
-            if (value > min + 0.005f && value < max - 0.005f) stops.add(value)
-        }
-        addBetween(3f)
-        var decade = 1.0
-        while (decade < max) {
-            addBetween(decade.toFloat())
-            addBetween((2 * decade).toFloat())
-            addBetween((5 * decade).toFloat())
-            decade *= 10
-        }
-        return stops.toList()
-    }
-}
+    val changing: Boolean = false, val keyRatios: List<Float> = listOf(1f))
 
 internal class CameraSession(
     private val view: PreviewView,
@@ -246,9 +229,11 @@ internal class CameraSession(
             analysis.setAnalyzer(worker, analyzer)
             binding = next
             capture = photo
+            val lensStops = rearZoomStops(context, camera.cameraInfo)
             val ranges = Observer<ZoomState> { range ->
                 if (this.camera === camera && (zoom.min != range.minZoomRatio || zoom.max != range.maxZoomRatio)) {
-                    zoom = zoom.copy(min = range.minZoomRatio, max = range.maxZoomRatio)
+                    zoom = zoom.copy(min = range.minZoomRatio, max = range.maxZoomRatio,
+                        keyRatios = lensStops.filter { it in range.minZoomRatio..range.maxZoomRatio })
                     onZoom(zoom)
                     setZoom(desiredZoom)
                 }

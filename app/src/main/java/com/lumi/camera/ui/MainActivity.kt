@@ -11,8 +11,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -171,6 +169,9 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
                     }
                     drawCircle(Color.White, 3.dp.toPx(), mid)
                 }
+                if (bound && zoom.max > zoom.min) {
+                    ZoomWheel(zoom, session::setZoom, Modifier.align(Alignment.BottomCenter))
+                }
             }
         }
         Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal = 16.dp),
@@ -192,7 +193,6 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
             }
         }
         Column(Modifier.align(Alignment.BottomCenter), horizontalAlignment = Alignment.CenterHorizontally) {
-            if (bound && zoom.max > zoom.min) ZoomControls(zoom, session::setZoom)
             frame.reason?.let { Text(it, color = Color.White, fontSize = 16.sp, maxLines = 1) }
             VisionChat.unavailableReason?.let { Text(it, color = Color.LightGray, fontSize = 12.sp) }
             Text(when {
@@ -211,32 +211,3 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
         }
     }
 }
-
-@Composable
-private fun ZoomControls(zoom: ViewfinderZoom, select: (Float) -> Unit) {
-    val stops = remember(zoom.min, zoom.max) { zoom.shortcuts() }
-    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically) {
-        ZoomChip(stops.first(), zoom.ratio, select)
-        if (stops.size > 2) {
-            Row(Modifier.weight(1f, fill = false).horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                for (index in 1 until stops.lastIndex) ZoomChip(stops[index], zoom.ratio, select)
-            }
-        }
-        ZoomChip(stops.last(), zoom.ratio, select)
-        if (stops.none { abs(it - zoom.ratio) < 0.005f }) {
-            Text(zoomLabel(zoom.ratio), color = Color.White, fontSize = 14.sp)
-        }
-    }
-}
-
-@Composable
-private fun ZoomChip(stop: Float, current: Float, select: (Float) -> Unit) {
-    FilterChip(selected = abs(stop - current) < 0.005f, onClick = { select(stop) },
-        label = { Text(zoomLabel(stop), maxLines = 1) })
-}
-
-private fun zoomLabel(value: Float) =
-    String.format(java.util.Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.') + "×"

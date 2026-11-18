@@ -1,6 +1,8 @@
 package com.lumi.camera.camera
 
 import com.lumi.camera.guidance.*
+import com.lumi.camera.ui.dragWheel
+import com.lumi.camera.ui.wheelStop
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.tan
@@ -8,13 +10,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ZoomOpticsTest {
-    @Test fun shortcutsIncludeTheReportedLimitsAndOnlyAvailableIntermediateRatios() {
-        assertEquals(listOf(1f, 2f, 3f, 5f, 10f, 20f), ViewfinderZoom(min = 1f, max = 20f).shortcuts())
-        assertEquals(listOf(0.6f, 1f, 2f, 3f, 5f, 7.5f), ViewfinderZoom(min = 0.6f, max = 7.5f).shortcuts())
-        assertEquals(listOf(1f, 2f, 2.4f), ViewfinderZoom(max = 2.4f).shortcuts())
-        assertEquals(listOf(1f), ViewfinderZoom().shortcuts())
-        val high = ViewfinderZoom(min = 0.5f, max = 120f).shortcuts()
-        assertEquals(listOf(0.5f, 1f, 2f, 3f, 5f, 10f, 20f, 50f, 100f, 120f), high)
+    @Test fun keyStopsUseEquivalentFieldsOfViewAndTheConfirmedStockShortcut() {
+        val main = 5.59f / 10.24f
+        val tele = 7.1f / 6.5536f
+        assertEquals(listOf(1f, 2f), lensZoomStops(main, listOf(main, tele), "other"))
+        assertEquals(listOf(1f, 2f, 4f), lensZoomStops(main, listOf(main, tele), "PKX110"))
+        assertEquals(listOf(1f), lensZoomStops(null, emptyList(), "unknown"))
+        assertEquals(listOf(0.6f, 1f, 3.5f), lensZoomStops(1f, listOf(0.6f, 1f, 3.5f, Float.NaN), "other"))
+    }
+
+    @Test fun dialAccumulatesSmallMovesAndCanStopBetweenLenses() {
+        val distance = -0.63 * kotlin.math.ln(2.8 / 2.0)
+        var raw = 2.0
+        repeat(30) { raw = dragWheel(raw, distance / 30, 1f, 20f) }
+        assertEquals(2.8f, wheelStop(raw, 1f, 20f), 0f)
+        assertEquals(2f, wheelStop(dragWheel(raw, -distance, 1f, 20f), 1f, 20f), 0f)
+        assertEquals(0.65f, wheelStop(dragWheel(2.0, 9.0, 0.65f, 7.54f), 0.65f, 7.54f), 0f)
+        assertEquals(7.54f, wheelStop(dragWheel(2.0, -9.0, 0.65f, 7.54f), 0.65f, 7.54f), 0f)
     }
 
     @Test fun effectiveFocalUsesTheAppliedFieldOfViewAndRejectsTransitionFrames() {
