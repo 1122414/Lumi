@@ -9,6 +9,11 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.interactivesegmenter.InteractiveSegmenter
 import com.lumi.camera.guidance.Uv
 
+// MediaPipe Android 0.10.35 omits the ROI proto's normalized flag. Its native graph
+// interprets this keypoint in pixels of the bitmap passed to segment(), including crops.
+internal fun magicTouchKeypoint(seed: Uv, width: Int, height: Int): NormalizedKeypoint =
+    NormalizedKeypoint.create((seed.x * width).toInt().toFloat(), (seed.y * height).toInt().toFloat())
+
 // Confined to the analysis executor, including initialization and close.
 internal class SubjectSegmenter(private val context: Context) : AutoCloseable {
     private var engine: InteractiveSegmenter? = null
@@ -20,7 +25,7 @@ internal class SubjectSegmenter(private val context: Context) : AutoCloseable {
         val bitmap = Bitmap.createBitmap(pixels.argb(), pixels.width, pixels.height, Bitmap.Config.ARGB_8888)
         try {
             BitmapImageBuilder(bitmap).build().use { image ->
-                val roi = InteractiveSegmenter.RegionOfInterest.create(NormalizedKeypoint.create(seed.x.toFloat(), seed.y.toFloat()))
+                val roi = InteractiveSegmenter.RegionOfInterest.create(magicTouchKeypoint(seed, pixels.width, pixels.height))
                 val result = task.segment(image, roi)
                 result.categoryMask().get().use { mask ->
                     val bytes = ByteArray(mask.width * mask.height)

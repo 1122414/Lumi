@@ -356,7 +356,8 @@ internal class CameraSession(
             observer?.selected = outline
             view.removeCallbacks(drawDirection)
             if (outline != null) view.postOnAnimation(drawDirection)
-            Log.i("LumiRecommendation", "modelMs=$elapsedMs identified=true outline=${outline != null} plan=false")
+            Log.i("LumiRecommendation", "modelMs=$elapsedMs identified=true modelOutline=${reply.subject != null} " +
+                "modelPlan=${plan != null} outline=${outline != null} plan=false")
             onRecommendationStatus(if (outline == null) "主体边缘暂未确认" else "已识别主体，暂无可信构图")
             render()
             return
