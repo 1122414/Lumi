@@ -40,6 +40,8 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
 
     @Volatile var selected: SubjectOutline? = null
 
+    fun prepareSelection() = segmenter.prepare()
+
     fun select(source: SceneFrame, subject: SelectedSubject): SubjectOutline? {
         val observation = source.observation ?: return null
         val pixels = source.pixels ?: return null
@@ -63,8 +65,16 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
                 if (media == null || pose == null || lens == null ||
                     SystemClock.elapsedRealtimeNanos() - captured !in 0..RotationGuidance.FRESH_NS) empty else {
                     // The single CameraX analysis worker owns the proxy until ML Kit finishes.
-                    val faces = Tasks.await(detector.process(InputImage.fromMediaImage(media, frame.rotation)))
-                    val face = faces.singleOrNull()
+                    val follower = selected
+                    val detection = if (request != null || follower?.person != false)
+                        detector.process(InputImage.fromMediaImage(media, frame.rotation)) else null
+                    val pixels = try {
+                        if (request != null || follower != null) SubjectPixels.read(image, frame) else null
+                    } finally {
+                        // ML Kit owns the media image until its task completes, including on a pixel-read failure.
+                        if (detection != null) Tasks.await(detection)
+                    }
+                    val face = detection?.result?.singleOrNull()
                     val id = face?.trackingId
                     val box = if (face != null && id != null) {
                         val bounds = face.boundingBox
@@ -78,8 +88,6 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
                         if (center.x in 0.0..1.0 && center.y in 0.0..1.0) SubjectPosition(id!!, center, it.right - it.left) else null
                     }
                     val observation = Observation(captured, pose, lens, detected)
-                    val follower = selected
-                    val pixels = if (request != null || follower != null) SubjectPixels.read(image, frame) else null
                     val outline = if (follower != null && pixels != null) follower.observe(observation, pixels) else null
                     val background = if (request != null || follower != null || detected != null) Background.read(image, frame) else null
                     SceneFrame(ts, captured, frame, observation, box, background, pixels, follower, outline)

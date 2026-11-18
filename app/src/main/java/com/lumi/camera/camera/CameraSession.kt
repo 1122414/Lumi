@@ -32,6 +32,7 @@ import com.lumi.camera.guidance.Guide
 import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.guidance.Uv
 import com.lumi.camera.guidance.ReturnDirection
+import com.lumi.camera.guidance.RingContinuity
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.shotplan.ModelFailure
@@ -80,6 +81,8 @@ internal class CameraSession(
     private val future = ProcessCameraProvider.getInstance(context)
     private val displays = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private class Run(val target: RememberedComposition, val reason: String?) {
+        val continuity = if (target.outline == null) null else RingContinuity()
+        var onFirstRing: (() -> Unit)? = null
         val guidance = RotationGuidance(target.observation, verifyScene = target.outline != null)
         val direction = ReturnDirection(target.observation, target.backgroundSource, target.outline?.bounds?.let {
             listOf(Uv(it.left,it.top), Uv(it.right,it.top), Uv(it.right,it.bottom), Uv(it.left,it.bottom))
@@ -242,9 +245,10 @@ internal class CameraSession(
         if (t != null) {
             val current = t.target.current(frame)
             t.visual = if (current == null) t.guidance.lost() else {
-                t.guidance.update(current, now) { view ->
+                val guide = t.guidance.update(current, now) { view ->
                     frame.background?.agrees(t.target.marks, RotationProjection(t.target.backgroundSource, view)) == true
                 }
+                t.continuity?.measured(guide, current) ?: guide
             }
         }
         render()
@@ -267,8 +271,13 @@ internal class CameraSession(
         val pose = poses?.latestAt(now)
         val seen = fresh?.outline?.takeIf { fresh.follower === identified?.outline }
         val guide = active?.let {
-            it.direction.display(visual, fresh?.let(it.target::current), pose, seen != null)
+            val projected = it.direction.display(visual, fresh?.let(it.target::current), pose, seen != null)
+            it.continuity?.display(projected, now, pose) ?: projected
         } ?: Guide(null)
+        if (guide.ring != null && active != null) {
+            active.onFirstRing?.invoke()
+            active.onFirstRing = null
+        }
         if (active != null && guide.evidence == GuideEvidence.RETURN_DIRECTION && (visual.ready || visual.merged)) {
             active.visual = active.guidance.lost()
         }
@@ -287,9 +296,9 @@ internal class CameraSession(
             guide.merged, active?.reason ?: identified?.name, outline, guide.evidence))
     }
 
-    private fun startGuide(target: RememberedComposition, reason: String? = null) {
+    private fun startGuide(target: RememberedComposition, reason: String? = null, firstRing: (() -> Unit)? = null) {
         observer?.selected = target.outline
-        run = Run(target, reason)
+        run = Run(target, reason).also { it.onFirstRing = firstRing }
         view.removeCallbacks(drawDirection)
         view.postOnAnimation(drawDirection)
         val frame = latest
@@ -345,33 +354,38 @@ internal class CameraSession(
         call = task
         requestGeometry = source.geometry
         onRecommendationStatus("正在推荐构图…")
+        observer?.let { analyzer -> worker.execute {
+            try { analyzer.prepareSelection() } catch (e: RuntimeException) {
+                Log.w("LumiCamera", "Subject model warmup unavailable", e)
+            }
+        } }
         network.execute {
-            var sentAtMs = 0L
+            var sentNs = now
             val result = try {
                 val jpeg = sample.use { task.remainingMs(); it.jpeg() }
-                sentAtMs = SystemClock.elapsedRealtime()
+                sentNs = SystemClock.elapsedRealtimeNanos()
                 Result.success(task.send(jpeg))
             } catch (e: Exception) { Result.failure(e) }
-            val elapsed = SystemClock.elapsedRealtime() - sentAtMs
+            val times = RequestTimes(token.startedNs, sentNs, SystemClock.elapsedRealtimeNanos())
             main.execute select@{
                 if (requests.active != token) return@select
                 val analyzer = observer
                 val subject = result.getOrNull()?.subject
                 if (analyzer == null || subject == null) {
-                    finishRecommendation(token, source, result, elapsed, null)
+                    finishRecommendation(token, source, result, times, null)
                 } else worker.execute {
                     val outline = try { analyzer.select(source, subject) } catch (e: RuntimeException) {
                         Log.w("LumiCamera", "Subject segmentation unavailable", e)
                         null
                     }
-                    main.execute { finishRecommendation(token, source, result, elapsed, outline) }
+                    main.execute { finishRecommendation(token, source, result, times, outline) }
                 }
             }
         }
     }
 
     private fun finishRecommendation(token: RequestToken, source: SceneFrame,
-        result: Result<ModelReply>, elapsedMs: Long, outline: SubjectOutline?) {
+        result: Result<ModelReply>, times: RequestTimes, outline: SubjectOutline?) {
         val completion = requests.finish(token, SystemClock.elapsedRealtimeNanos())
         if (completion == RecommendationRequests.Completion.OBSOLETE) return
         handler.removeCallbacks(timeout)
@@ -394,7 +408,7 @@ internal class CameraSession(
             observer?.selected = outline
             view.removeCallbacks(drawDirection)
             if (outline != null) view.postOnAnimation(drawDirection)
-            recordDecision(problem.name, elapsedMs)
+            recordDecision(problem.name, times, SystemClock.elapsedRealtimeNanos())
             onRecommendationStatus(problem.notice)
             render()
         }
@@ -406,20 +420,26 @@ internal class CameraSession(
             is PlanResult.Accepted -> decision.value
             is PlanResult.Rejected -> return reject(decision.problem)
         }
-        recordDecision("ACCEPTED", elapsedMs)
-        Log.i("LumiRecommendation", "modelMs=$elapsedMs aimPoint=(${plan.aimPoint.x},${plan.aimPoint.y}) " +
+        val decided = SystemClock.elapsedRealtimeNanos()
+        recordDecision("ACCEPTED", times, decided)
+        Log.i("LumiRecommendation", "aimPoint=(${plan.aimPoint.x},${plan.aimPoint.y}) " +
             "confidence=${plan.confidence} alreadyGood=${plan.alreadyGood} reason=" + VisionChat.logReason(plan.reason))
         onRecommendationStatus(null)
-        startGuide(target, plan.caption)
+        startGuide(target, plan.caption) { recordDecision("ACCEPTED", times, decided, SystemClock.elapsedRealtimeNanos()) }
     }
 
-    private fun recordDecision(outcome: String, modelMs: Long) {
+    private data class RequestTimes(val tap: Long, val sent: Long, val replied: Long)
+
+    private fun recordDecision(outcome: String, times: RequestTimes, decided: Long, firstRing: Long? = null) {
         if (!BuildConfig.DEBUG) return
-        val summary = "${System.currentTimeMillis()} outcome=$outcome modelMs=$modelMs"
+        fun ms(ns: Long) = ns / 1_000_000
+        val summary = "${System.currentTimeMillis()} outcome=$outcome prepareMs=${ms(times.sent-times.tap)} " +
+            "modelMs=${ms(times.replied-times.sent)} verifyMs=${ms(decided-times.replied)}" +
+            (firstRing?.let { " firstRingMs=${ms(it-times.tap)}" } ?: "")
         Log.i("LumiRecommendation", summary)
         val history = context.getSharedPreferences("recommendation_outcomes", Context.MODE_PRIVATE)
         history.edit {
-            putString("previous", history.getString("latest", null))
+            if (firstRing == null) putString("previous", history.getString("latest", null))
             putString("latest", summary)
         }
     }

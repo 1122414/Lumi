@@ -15,6 +15,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SubjectOutlineTest {
+    @Test fun compactSelectionRequiresATightBoxAndAnInteriorPointAndStillDrawsAMeasuredContour() {
+        val compact = mapOf("name" to "玩偶", "kind" to "object", "box" to listOf(220,220,510,685),
+            "point" to listOf(365,480))
+        val selected = SelectedSubject.parse(compact)!!
+        assertEquals(Uv(.365,.48), selected.seed)
+        val pixels = image()
+        val lock = SubjectOutline.from(source, selected, pixels, segment)!!
+        val seen = lock.observe(source.copy(timeNs = 40_000_000L), pixels)!!
+        assertTrue(seen.points.filterNotNull().size > 8)
+        assertFalse(seen.mask.contains(Uv(.23,.23)))
+        for (bad in listOf(compact - "point", compact + ("point" to listOf(220,400)),
+            compact + ("box" to listOf(510,220,220,685)), compact + ("box" to listOf(220,220,1100,685)))) {
+            assertNull(SelectedSubject.parse(bad))
+        }
+    }
     // Two ears and a deep notch make a rectangle or a convex hull visibly wrong.
     private val vertices = listOf(listOf(250,250), listOf(285,225), listOf(335,340), listOf(400,325),
         listOf(450,220), listOf(475,260), listOf(465,480), listOf(510,580), listOf(465,685),

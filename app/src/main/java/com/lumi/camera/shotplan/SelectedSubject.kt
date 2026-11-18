@@ -4,7 +4,7 @@ import com.lumi.camera.guidance.Uv
 import com.lumi.camera.vision.FaceBox
 import kotlin.math.abs
 
-internal class SelectedSubject private constructor(val name: String, val person: Boolean, val outline: List<Uv>) {
+internal class SelectedSubject private constructor(val name: String, val person: Boolean, val outline: List<Uv>, val seed: Uv? = null) {
     val bounds = FaceBox(outline.minOf { it.x }, outline.minOf { it.y }, outline.maxOf { it.x }, outline.maxOf { it.y })
 
     fun contains(p: Uv): Boolean {
@@ -28,14 +28,24 @@ internal class SelectedSubject private constructor(val name: String, val person:
 
         fun parse(raw: Any?): SelectedSubject? {
             val fields = raw as? Map<*, *> ?: return null
-            if (fields.keys != setOf("name", "kind", "outline")) return null
             val name = nameOf(fields) ?: return null
             val person = when (fields["kind"]) { "person" -> true; "object" -> false; else -> return null }
-            val vertices = fields["outline"] as? List<*> ?: return null
-            if (vertices.size !in 6..MAX_VERTICES) return null
             fun coordinate(n: Any?): Double? = (n as? Number)?.toDouble()?.takeIf {
                 it in 0.0..1000.0 && it == it.toInt().toDouble()
             }?.div(1000)
+            if (fields.keys == setOf("name", "kind", "box", "point")) {
+                val box = fields["box"] as? List<*> ?: return null
+                val point = fields["point"] as? List<*> ?: return null
+                if (box.size != 4 || point.size != 2) return null
+                val (left, top, right, bottom) = box.map { coordinate(it) ?: return null }
+                val seed = Uv(coordinate(point[0]) ?: return null, coordinate(point[1]) ?: return null)
+                if (seed.x <= left || seed.x >= right || seed.y <= top || seed.y >= bottom ||
+                    (right-left)*(bottom-top) < 0.002) return null
+                return SelectedSubject(name, person, listOf(Uv(left,top), Uv(right,top), Uv(right,bottom), Uv(left,bottom)), seed)
+            }
+            if (fields.keys != setOf("name", "kind", "outline")) return null
+            val vertices = fields["outline"] as? List<*> ?: return null
+            if (vertices.size !in 6..MAX_VERTICES) return null
             val points = vertices.map {
                 val pair = it as? List<*> ?: return null
                 if (pair.size != 2) return null

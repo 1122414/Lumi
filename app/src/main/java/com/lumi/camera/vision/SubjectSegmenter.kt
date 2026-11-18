@@ -23,14 +23,13 @@ internal class SubjectSegmenter(private val context: Context) : AutoCloseable {
     private var engine: InteractiveSegmenter? = null
     private var delegate = Delegate.GPU
 
-    private fun infer(image: MPImage, roi: InteractiveSegmenter.RegionOfInterest): ImageSegmenterResult {
-        fun runTask(): ImageSegmenterResult {
-            val task = engine ?: InteractiveSegmenter.createFromOptions(context,
+    private fun task() = engine ?: InteractiveSegmenter.createFromOptions(context,
                 InteractiveSegmenter.InteractiveSegmenterOptions.builder().setBaseOptions(
                     BaseOptions.builder().setModelAssetPath("magic_touch.tflite").setDelegate(delegate).build())
                     .setOutputCategoryMask(true).setOutputConfidenceMasks(false).build()).also { engine = it }
-            return task.segment(image, roi)
-        }
+    fun prepare() { withDelegate { task() } }
+
+    private fun <T> withDelegate(runTask: () -> T): T {
         if (delegate == Delegate.CPU) return runTask()
         try {
             return runTask()
@@ -49,7 +48,7 @@ internal class SubjectSegmenter(private val context: Context) : AutoCloseable {
         try {
             BitmapImageBuilder(bitmap).build().use { image ->
                 val roi = InteractiveSegmenter.RegionOfInterest.create(magicTouchKeypoint(seed, pixels.width, pixels.height))
-                val result = infer(image, roi)
+                val result: ImageSegmenterResult = withDelegate { task().segment(image, roi) }
                 result.categoryMask().get().use { mask ->
                     val bytes = ByteArray(mask.width * mask.height)
                     ByteBufferExtractor.extract(mask).duplicate().get(bytes)

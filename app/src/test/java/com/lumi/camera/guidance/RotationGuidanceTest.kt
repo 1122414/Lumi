@@ -23,6 +23,26 @@ class RotationGuidanceTest {
         Observation(ms * 1_000_000L, pose, lens, face.copy(center = uv))
     private fun RotationGuidance.feed(o: Observation) = update(o, o.timeNs, true)
 
+    @Test fun shortVerificationGapsReprojectTheLastImageWithoutReusingReadiness() {
+        val continuity = RingContinuity()
+        val frame = sample(100)
+        continuity.measured(Guide(Uv.CENTER, ready = true, evidence = GuideEvidence.CONFIRMED), frame)
+        for ((i, evidence) in listOf(GuideEvidence.MISMATCH, GuideEvidence.BACKGROUND_UNCERTAIN,
+            GuideEvidence.NO_FACE, GuideEvidence.STALE).withIndex()) {
+            val time = frame.timeNs + (i+1)*80_000_000L
+            val gap = continuity.measured(Guide(null, evidence = evidence), frame.copy(timeNs = time))
+            val projected = continuity.display(gap, time, right(4.0))
+            assertEquals(0.5-lens.fx*tan(Math.toRadians(4.0)), projected.ring!!.x, 1e-6)
+            assertFalse(projected.ready || projected.merged || projected.trusted)
+        }
+        val gap = Guide(null, evidence = GuideEvidence.STALE)
+        assertNull(continuity.display(gap, 451_000_000L, origin).ring)
+        assertNull(continuity.display(gap, 200_000_000L, right(20.0)).ring)
+        assertNull(continuity.display(gap, 200_000_000L, null).ring)
+        continuity.measured(Guide(null, evidence = GuideEvidence.OTHER_FACE), sample(201))
+        assertNull(continuity.display(gap, 202_000_000L, origin).ring)
+    }
+
     @Test fun returnBearingSurvivesTheSideAndRearHemisphereWithoutAFaceOrCameraFrame() {
         for (sign in listOf(1.0, -1.0)) {
             val direction = ReturnDirection(target)

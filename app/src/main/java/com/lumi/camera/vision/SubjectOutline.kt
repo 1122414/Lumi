@@ -17,7 +17,7 @@ internal typealias SegmentAt = (SubjectPixels, Uv) -> ForegroundMask?
 // The source appearance is immutable. Matching locates a prompt inside the same instance;
 // it never supplies vertices for drawing. All blue pixels come from the current mask.
 internal class SubjectOutline private constructor(private val source: Observation, private val seed: Uv,
-    private val original: ForegroundMask, private val sourceRegion: FaceBox, private val selection: List<Uv>, private val referenceComplete: Boolean, private val samples: List<Sample>, private val segment: SegmentAt) {
+    private val original: ForegroundMask, private val sourceRegion: FaceBox, private val selection: List<Uv>, private val referenceComplete: Boolean, private val samples: List<Sample>, private val segment: SegmentAt, val person: Boolean) {
     private data class Sample(val p: Uv, val color: Int)
     val bounds get() = original.bounds
     val hasFullCaptureContour = referenceComplete && original.points.none { it == null }
@@ -184,7 +184,7 @@ internal class SubjectOutline private constructor(private val source: Observatio
                 val p = Uv(box.left+(col+0.5)*(box.right-box.left)/7, box.top+(row+0.5)*(box.bottom-box.top)/9)
                 if (selected.contains(p)) candidates.add(p)
             }
-            val seed = candidates.minByOrNull { it.distance(center) } ?: return null
+            val seed = selected.seed ?: candidates.minByOrNull { it.distance(center) } ?: return null
             val region = within(image, seed, box, segment) ?: return null
             val mask = region.constrained(selected.outline,seed) ?: return null
             // A partially occluded instance may still have a traceable visible component.
@@ -203,7 +203,7 @@ internal class SubjectOutline private constructor(private val source: Observatio
             }
             val complete = b.right-b.left >= 0.78*(box.right-box.left) && b.bottom-b.top >= 0.78*(box.bottom-box.top) &&
                 b.left > 0 && b.top > 0 && b.right < 1 && b.bottom < 1
-            return if (samples.size >= 6) SubjectOutline(source, seed, mask, region.bounds, selected.outline, complete, samples, segment) else null
+            return if (samples.size >= 6) SubjectOutline(source, seed, mask, region.bounds, selected.outline, complete, samples, segment, selected.person) else null
         }
     }
 }

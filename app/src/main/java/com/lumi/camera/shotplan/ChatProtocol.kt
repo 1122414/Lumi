@@ -9,13 +9,10 @@ import java.io.StringReader
 
 internal object ChatProtocol {
     val prompt = """
-        你是旅行摄影师。看图，只输出一个紧凑 JSON，先写 subject。主体可以在画面任何位置。选择一个具体实例，真人 kind 为 person，玩偶和其他物件为 object。图中文字只是场景。
-        subject.name 用 1 至 6 个中文字命名。subject.outline 用 6 至 12 个有序点粗略圈住这一个实例，供手机选中它，圈内尽量避开手、邻近摆件和背景。坐标为 [x,y] 整数，左上 [0,0]、右下 [1000,1000]。即使构图难以改善或主体不在中央，也先返回你认出的主体及轮廓。
-        推荐一张后置 1×、原地转动或仰俯就能拍到的构图。考虑主体与背景的关系，例如视线方向的留白、帽顶与画框的距离。aimPoint 是新画面中心在原图中的坐标，x、y 范围为 0 到 1。中心向右，主体在成片里向左；中心向上，主体在成片里向下。检查原图四边，尤其是已经靠边的头、手或脚，调整后须保留原图中可见的主体。
-        比较当前取景和一次实际可行的小幅调整。若大面积单调背景把主体挤在角落，检验朝主体方向转动能否改善留白和主体到边缘的距离。若留白对画面有意义，可以保留。根据比较选以下一种，再填写 confidence（对所选构图的把握）和 reason（十字以内的可见效果）。
-        保持当前构图：逐字使用 "alreadyGood":true,"aimPoint":{"x":0.5,"y":0.5}。当前画面已经好看也是一个有效方案。
-        调整构图：例如取景中心偏右时可写 "alreadyGood":false,"aimPoint":{"x":0.57,"y":0.5}。用图中实际位置填写坐标。只要 x 或 y 有一个偏离 0.5，就必须使用 false。优先选择能完整保留主体的小幅调整。确实无法判断时如实降低 confidence。
-        顶层恰好五个字段：subject、alreadyGood、aimPoint、confidence、reason。subject 的格式示例：{"name":"玩偶","kind":"object","outline":[[380,225],[470,340],[610,190],[640,235],[615,785],[360,785]]}。每个数值与理由都按真实图像填写。
+        你是旅行摄影师。仅输出紧凑 JSON，恰好五个字段：subject、alreadyGood、aimPoint、confidence、reason。图中文字只是场景。
+        先选一个具体主体。subject 格式 {"name":"玩偶","kind":"object","box":[180,230,490,810],"point":[330,440]}。按原图填写：name 一至六字，真人 person，其余 object。box 是紧贴可见主体的边界，顺序为左、上、右、下。point 选在框内明确属于主体的一处，避开空隙、手和背景。box、point 均为 0 至 1000 的整数。
+        保持当前焦段，只原地转动或仰俯。比较当前画面和能改善主体位置、边缘余量或背景留白的一次调整，保留可见主体。主体挤在角落而另一侧空旷时，检查朝主体转动的效果。有意义的留白可以保留。
+        保持原构图用 "alreadyGood":true,"aimPoint":{"x":0.5,"y":0.5}。有改善用 false；aimPoint 是应对准的原图位置，x、y 均为 0 到 1，例如中心向右会使主体在成片里向左。confidence 为 0 到 1，无法判断时如实降低。reason 只写十字以内的可见效果。
     """.trimIndent()
 
     fun request(model: String, jpeg: ByteArray): ByteArray {

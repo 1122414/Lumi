@@ -86,6 +86,38 @@ internal data class Guide(val ring: Uv?, val ready: Boolean = false,
     val trusted get() = evidence == GuideEvidence.CONFIRMED
 }
 
+// Owned by one recommendation. Only a new image measurement can renew the display anchor.
+internal class RingContinuity {
+    private var exposure: Observation? = null
+    private var point = Uv.CENTER
+
+    fun measured(guide: Guide, frame: Observation): Guide {
+        val ring = guide.ring
+        if (guide.evidence == GuideEvidence.OTHER_FACE) exposure = null
+        if (ring == null || frame.subject == null) return guide
+        val prior = exposure
+        val elapsed = prior?.let { frame.timeNs - it.timeNs } ?: 0L
+        val prediction = if (prior != null && prior.subject?.id == frame.subject.id && elapsed in 1..HOLD_NS)
+            RotationProjection(prior, frame).project(point) else null
+        point = if (guide.merged || guide.ready || prediction == null || prediction.distance(ring) > 0.12) ring else {
+            val weight = 1.0 - exp(-elapsed / 65_000_000.0)
+            Uv(prediction.x + weight*(ring.x-prediction.x), prediction.y + weight*(ring.y-prediction.y))
+        }
+        exposure = frame
+        return guide.copy(ring = point)
+    }
+
+    fun display(guide: Guide, nowNs: Long, pose: Pose?): Guide {
+        if (guide.ring != null || pose == null || guide.evidence == GuideEvidence.OTHER_FACE) return guide
+        val anchor = exposure ?: return guide
+        if (nowNs - anchor.timeNs !in 0..HOLD_NS || anchor.pose.degreesTo(pose) > 12.0) return guide
+        val projected = RotationProjection(anchor, anchor.copy(pose = pose)).project(point) ?: return guide
+        return Guide(projected, evidence = GuideEvidence.VERIFYING_COMPOSITION)
+    }
+
+    private companion object { const val HOLD_NS = 350_000_000L }
+}
+
 internal class ReturnDirection(private val target: Observation, private val source: Observation = target,
     private val subjectCorners: List<Uv> = emptyList()) {
     private var previousEdge = Uv(1.0, 0.5)
