@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -38,7 +39,11 @@ import com.lumi.camera.camera.Viewfinder
 import com.lumi.camera.camera.ViewfinderZoom
 import com.lumi.camera.camera.Point
 import com.lumi.camera.guidance.GuideEvidence
-import com.lumi.camera.shotplan.VisionChat
+import com.lumi.camera.shotplan.ConnectionResult
+import com.lumi.camera.shotplan.ModelConfig
+import com.lumi.camera.shotplan.ModelConfigStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlinx.coroutines.delay
 
@@ -63,11 +68,17 @@ class MainActivity : ComponentActivity() {
         requested = savedInstanceState?.getBoolean("requested") ?: false
         enableEdgeToEdge()
         setContent {
+            val store = remember { ModelConfigStore(applicationContext) }
             MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFFB3DBBE))) {
                 Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
                     .safeDrawingPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
                     if (allowed) {
-                        CameraScreen(this@MainActivity, { session = it }, permissions::requestAlbum, ::notifyUser)
+                        val initial by produceState<ModelConfig?>(null, store) {
+                            value = withContext(Dispatchers.IO) { store.read() }
+                        }
+                        initial?.let {
+                            CameraScreen(this@MainActivity, store, it, { session = it }, permissions::requestAlbum, ::notifyUser)
+                        }
                     } else {
                         Spacer(Modifier.weight(1f))
                         Text(if (requested) "没有相机权限，无法取景。" else "Lumi 需要相机权限来取景和拍照。",
@@ -93,7 +104,8 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSession?) -> Unit,
+private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStore, initial: ModelConfig,
+    onSession: (CameraSession?) -> Unit,
     onShoot: () -> Unit, onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val preview = remember(context) {
@@ -107,11 +119,22 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
     var bound by remember { mutableStateOf(false) }
     var zoom by remember { mutableStateOf(ViewfinderZoom()) }
     var recommendationStatus by remember { mutableStateOf<String?>(null) }
+    var config by remember { mutableStateOf(initial) }
+    val configured = remember(config) { config.validationError(BuildConfig.DEBUG) == null }
+    var lastFailed by remember { mutableStateOf(store.lastFailed) }
+    var settingsOpen by remember { mutableStateOf(false) }
+    fun setFailure(failed: Boolean) {
+        if (lastFailed != failed) {
+            store.lastFailed = failed
+            lastFailed = failed
+        }
+    }
     val session = remember(preview, owner) {
         CameraSession(preview, owner, { next ->
             frame = next
             if (next.ring != null || !next.hasTarget) paintRing = next.ring
-        }, { bound = it }, onMessage, { recommendationStatus = it }, { zoom = it })
+        }, { bound = it }, onMessage, { recommendationStatus = it }, config,
+            { setFailure(it != ConnectionResult.SUCCESS) }, { zoom = it })
     }
     DisposableEffect(session) {
         onSession(session)
@@ -177,6 +200,17 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
         Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Lumi", color = Color.White)
+            TextButton(onClick = { settingsOpen = true }, modifier = Modifier.weight(1f)) {
+                Text("模型", fontSize = 13.sp)
+                Spacer(Modifier.width(8.dp))
+                Text(config.safeText(config.model), Modifier.weight(1f), color = Color.White, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, fontSize = 13.sp)
+                Text(when {
+                    !configured -> "未配置"
+                    lastFailed -> "上次失败"
+                    else -> "可用"
+                }, fontSize = 12.sp)
+            }
             if (BuildConfig.DEBUG) Box {
                 var debugMenuOpen by remember { mutableStateOf(false) }
                 TextButton(onClick = { debugMenuOpen = true }) { Text("调试", fontSize = 12.sp) }
@@ -194,7 +228,6 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
         }
         Column(Modifier.align(Alignment.BottomCenter), horizontalAlignment = Alignment.CenterHorizontally) {
             frame.reason?.let { Text(it, color = Color.White, fontSize = 16.sp, maxLines = 1) }
-            VisionChat.unavailableReason?.let { Text(it, color = Color.LightGray, fontSize = 12.sp) }
             Text(when {
                 frame.ready -> "可以拍"
                 !bound -> "正在打开后置相机"
@@ -205,9 +238,17 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
                 else -> "对准想拍的人或物"
             }, color = Color.White, fontSize = 14.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(session::recommend, enabled = bound && !zoom.changing && VisionChat.unavailableReason == null) { Text("推荐构图") }
+                Button(session::recommend, enabled = bound && !zoom.changing && configured) { Text("推荐构图") }
                 OutlinedButton(onShoot, enabled = bound && !zoom.changing) { Text("拍照并保存") }
             }
         }
     }
+    if (settingsOpen) ModelSettingsDialog(config, store, onDismiss = { settingsOpen = false },
+        onTested = { draft, result -> if (draft == config) setFailure(result != ConnectionResult.SUCCESS) },
+        onSaved = { saved, result ->
+            setFailure(result?.let { it != ConnectionResult.SUCCESS } ?: (saved == config && lastFailed))
+            session.useModelConfig(saved)
+            config = saved
+            settingsOpen = false
+        })
 }

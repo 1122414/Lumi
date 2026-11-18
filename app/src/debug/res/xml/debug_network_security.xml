@@ -1,6 +1,4 @@
-<network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">127.0.0.1</domain>
-    </domain-config>
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <!-- Only debug builds allow user-entered LAN endpoints. The panel warns before use. -->
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration" />
 </network-security-config>

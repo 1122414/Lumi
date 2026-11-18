@@ -8,9 +8,15 @@
 
 推荐图仅在内存中处理。模型可以推荐保留当前构图，此时目标就在白点处，仍需核对画面并停稳。方案被拒绝时，快门上方会显示具体原因，例如「模型对这次构图把握不足」或「推荐角度会裁掉主体」。请求期限为 20 秒，再次点推荐会替换上次请求。退到后台或相机会话重建后需重新推荐。开发者可在 debug 版右上角点「调试」，选择「记住这个构图」离线检查绿环。
 
-## 本地配置（仅 debug）
+## 在手机上配置模型
 
-在项目根目录已忽略的 `local.properties` 中保留原有的 `sdk.dir`，另外填写以下三项，再重新构建、安装。接口需支持 Chat Completions 和内嵌 JPEG 的 `image_url`；远程服务使用 HTTPS。
+点取景器上方的「模型」，填写接口地址、模型名和 API key。接口需支持 Chat Completions 和内嵌 JPEG 的 `image_url`。填到 `/v1` 会自动追加 `/chat/completions`，也可填完整接口地址。点「测试连接」会发送一张内置的 96 × 96 苹果图，面板显示结果和耗时。点「保存」会清除当前推荐，下一次推荐立即使用新配置。
+
+「未配置」表示缺少有效配置。「可用」表示配置可以发起请求，「上次失败」表示这组配置最近一次连接或模型回复校验失败。设置面板里的测试可以确认当前是否连通。API key 默认隐藏，临时显示 10 秒后自动隐藏，设置面板禁止系统截图。保存的密钥经 Android Keystore 的 AES-GCM 密钥加密。
+
+release 版使用 HTTPS。debug 版也支持 HTTP。手机和电脑在同一可信局域网时，可以填写电脑的局域网地址，例如 `http://192.168.1.20:3425/v1`，电脑服务需监听该地址并允许手机访问。使用 USB 时，执行 `adb reverse tcp:3425 tcp:3425`，手机填写 `http://127.0.0.1:3425/v1`。
+
+应用内保存的配置优先。首次使用且从未保存过配置时，debug 版可从构建时的 `local.properties` 取得以下默认值。保留原有的 `sdk.dir`。这些默认值会打包进 debug APK，请勿分发含个人密钥的 APK 或提交 `local.properties`。release 版从空配置开始。
 
 ```properties
 LUMI_LLM_BASE_URL=https://your-service.example/v1
@@ -18,11 +24,7 @@ LUMI_LLM_MODEL=your-vision-model
 LUMI_LLM_API_KEY=your-local-test-key
 ```
 
-以 `/v1` 结尾的地址会追加 `/chat/completions`，也可填完整接口地址。缺少任一项时，「推荐构图」不可用，取景器下方会显示原因。密钥会随本机 debug APK 一起打包，不要分享带密钥的 APK，也不要提交 `local.properties`。release 不注入这些配置。
-
-模型服务运行在 USB 所连的电脑上时，debug 版也接受 `http://127.0.0.1`。例如电脑监听 3425 端口：设 `LUMI_LLM_BASE_URL=http://127.0.0.1:3425/v1`，在电脑执行 `adb reverse tcp:3425 tcp:3425`。手机就能通过 USB 访问该服务，无需让电脑监听局域网。重新连接手机后可用 `adb reverse --list` 检查转发。
-
-使用 `workbuddy/deepseek-v4.1-flash` 时，Lumi 关闭长推理。模型返回主体范围和内部一点，手机据此分割并绘制轮廓。调试版保存最近两次构图判断的准备、模型和本地核对耗时，首次显示绿环后补记从点击到显示的总耗时。
+使用 `workbuddy/deepseek-v4.1-flash` 时，Lumi 按模型名关闭长推理。调试版的 `LumiRecommendation` 日志与私有 `recommendation_outcomes` 记录包含模型名、接口主机名以及准备、模型和本地核对耗时。最近两次判断保存在手机上，首次显示绿环后补记从点击到显示的总耗时。
 
 ## 构建
 

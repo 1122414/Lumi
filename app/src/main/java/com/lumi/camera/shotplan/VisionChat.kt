@@ -5,39 +5,12 @@ import com.lumi.camera.BuildConfig
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.Proxy
-import java.net.URI
-import java.net.URL
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicReference
 
-internal class ModelFailure(val notice: String) : Exception()
-
-internal fun chatEndpoint(value: String, debug: Boolean): URL? = runCatching {
-    val base = URI(value)
-    val usbLoopback = debug && base.scheme.equals("http", true) && base.host == "127.0.0.1"
-    require((base.scheme.equals("https", true) || usbLoopback) && !base.host.isNullOrBlank() &&
-        base.userInfo == null && base.query == null && base.fragment == null)
-    val root = base.toASCIIString().trimEnd('/')
-    when {
-        base.path.trim('/').isEmpty() -> URL(root + "/v1/chat/completions")
-        root.endsWith("/chat/completions") -> URL(root)
-        else -> URL(root + "/chat/completions")
-    }
-}.getOrNull()
-
-internal class VisionChat(private val token: RequestToken) {
+internal class VisionChat(private val config: ModelConfig, private val deadlineNs: Long) {
     companion object {
-        private val endpoint = chatEndpoint(BuildConfig.LUMI_LLM_BASE_URL, BuildConfig.DEBUG)
-        val unavailableReason: String? = when {
-            !BuildConfig.DEBUG -> "此版本未启用推荐服务。"
-            listOf(BuildConfig.LUMI_LLM_BASE_URL, BuildConfig.LUMI_LLM_MODEL, BuildConfig.LUMI_LLM_API_KEY)
-                .any(String::isBlank) -> "推荐服务未配置，暂不能推荐构图。"
-            endpoint == null -> "推荐服务地址无效，请检查本地配置。"
-            else -> null
-        }
         const val TIMEOUT_NOTICE = "推荐超时（20 秒），可以重新推荐。"
-        fun logReason(reason: String): String = if (BuildConfig.LUMI_LLM_API_KEY.isEmpty()) reason
-            else reason.replace(BuildConfig.LUMI_LLM_API_KEY, "［已隐藏］")
     }
 
     private val connection = AtomicReference<HttpURLConnection?>()
@@ -49,15 +22,15 @@ internal class VisionChat(private val token: RequestToken) {
     }
 
     fun remainingMs(): Int {
-        val remaining = token.deadlineNs - SystemClock.elapsedRealtimeNanos()
-        if (cancelled || remaining <= 0) throw ModelFailure(TIMEOUT_NOTICE)
+        val remaining = deadlineNs - SystemClock.elapsedRealtimeNanos()
+        if (cancelled || remaining <= 0) throw ModelFailure(ConnectionResult.UNREACHABLE, TIMEOUT_NOTICE)
         return ((remaining + 999_999L) / 1_000_000L).toInt()
     }
 
     fun send(jpeg: ByteArray): ModelReply {
         remainingMs()
-        val payload = ChatProtocol.request(BuildConfig.LUMI_LLM_MODEL, jpeg)
-        val url = checkNotNull(endpoint)
+        val payload = ChatProtocol.request(config.model, jpeg)
+        val url = checkNotNull(chatEndpoint(config.address, BuildConfig.DEBUG))
         val conn = (if (url.protocol == "http") url.openConnection(Proxy.NO_PROXY) else url.openConnection()) as HttpURLConnection
         connection.set(conn)
         try {
@@ -68,12 +41,12 @@ internal class VisionChat(private val token: RequestToken) {
             conn.instanceFollowRedirects = false
             conn.useCaches = false
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            conn.setRequestProperty("Authorization", "Bearer " + BuildConfig.LUMI_LLM_API_KEY)
+            conn.setRequestProperty("Authorization", "Bearer " + config.apiKey)
             conn.setFixedLengthStreamingMode(payload.size)
             conn.outputStream.use { it.write(payload) }
             remainingMs()
             val code = conn.responseCode
-            if (code !in 200..299) throw ModelFailure("推荐服务返回 HTTP $code，可以重新推荐。")
+            if (code !in 200..299) throw ModelFailure(ConnectionResult.httpFailure(code), "推荐服务返回 HTTP $code，可以重新推荐。", code)
             val body = conn.inputStream.use { input ->
                 val out = ByteArrayOutputStream()
                 val buf = ByteArray(4096)
@@ -81,13 +54,13 @@ internal class VisionChat(private val token: RequestToken) {
                     remainingMs()
                     val n = input.read(buf)
                     if (n < 0) break
-                    if (out.size() + n > 65_536) throw ModelFailure("推荐返回内容过大。")
+                    if (out.size() + n > 65_536) throw ModelFailure(ConnectionResult.FORMAT, "推荐返回内容过大。")
                     out.write(buf, 0, n)
                 }
                 out.toString("UTF-8")
             }
             return try { ChatProtocol.response(body) } catch (_: Exception) { null }
-                ?: throw ModelFailure("模型未返回可识别的主体，请重新推荐。")
+                ?: throw ModelFailure(ConnectionResult.FORMAT, "模型未返回可识别的主体，请重新推荐。")
         } finally {
             connection.compareAndSet(conn, null)
             conn.disconnect()

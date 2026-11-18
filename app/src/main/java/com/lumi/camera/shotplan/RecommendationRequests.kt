@@ -3,7 +3,7 @@ package com.lumi.camera.shotplan
 import com.lumi.camera.guidance.RotationGuidance
 import java.util.concurrent.atomic.AtomicReference
 
-internal data class RequestToken(val id: Long, val startedNs: Long, val deadlineNs: Long)
+internal data class RequestToken(val id: Long, val startedNs: Long, val deadlineNs: Long, val config: ModelConfig)
 
 internal class PendingRecommendationFrame {
     private val waiting = AtomicReference<RequestToken?>()
@@ -15,12 +15,20 @@ internal class PendingRecommendationFrame {
 }
 
 // Owned by the camera session's main thread. A completed or cancelled token is single-use.
-internal class RecommendationRequests {
+internal class RecommendationRequests(initialConfig: ModelConfig = ModelConfig()) {
+    var config = initialConfig
+        private set
+
+    fun useConfig(value: ModelConfig) {
+        cancel()
+        config = value
+    }
+
     private var serial = 0L
     var active: RequestToken? = null
         private set
 
-    fun begin(nowNs: Long) = RequestToken(++serial, nowNs, nowNs + 20_000_000_000L).also { active = it }
+    fun begin(nowNs: Long) = RequestToken(++serial, nowNs, nowNs + 20_000_000_000L, config).also { active = it }
     fun cancel() { active = null }
 
     enum class Completion { ACCEPT, EXPIRED, OBSOLETE }

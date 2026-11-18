@@ -38,6 +38,8 @@ import com.lumi.camera.guidance.ReturnDirection
 import com.lumi.camera.guidance.RingContinuity
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
+import com.lumi.camera.shotplan.ConnectionResult
+import com.lumi.camera.shotplan.ModelConfig
 import com.lumi.camera.shotplan.ModelFailure
 import com.lumi.camera.shotplan.ModelReply
 import com.lumi.camera.shotplan.PlanProblem
@@ -67,6 +69,8 @@ internal class CameraSession(
     private val onBound: (Boolean) -> Unit,
     private val onMessage: (String) -> Unit,
     private val onRecommendationStatus: (String?) -> Unit,
+    initialConfig: ModelConfig,
+    private val onConnection: (ConnectionResult) -> Unit,
     private val onZoom: (ViewfinderZoom) -> Unit,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
     private data class Binding(val size: Extent, val rotation: Int)
@@ -75,12 +79,13 @@ internal class CameraSession(
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private val network = Executors.newCachedThreadPool()
-    private val requests = RecommendationRequests()
+    private val requests = RecommendationRequests(initialConfig)
     private var call: VisionChat? = null
     private var requestGeometry: FrameGeometry? = null
     private val timeout = Runnable {
         if (requests.active != null) {
-            val notice = if (call == null) "取景超时，未取得同步的画面和手机姿态。" else VisionChat.TIMEOUT_NOTICE
+            val notice = if (requestGeometry == null) "取景超时，未取得同步的画面和手机姿态。" else VisionChat.TIMEOUT_NOTICE
+            if (call != null) onConnection(ConnectionResult.UNREACHABLE)
             cancelRecommendation()
             onRecommendationStatus(notice)
         }
@@ -356,8 +361,19 @@ internal class CameraSession(
         startGuide(target)
     }
 
+    fun useModelConfig(config: ModelConfig) {
+        cancelRecommendation()
+        requests.useConfig(config)
+        view.removeCallbacks(drawDirection)
+        run = null
+        selection = null
+        observer?.selected = null
+        onRecommendationStatus(null)
+        onFrame(Viewfinder(canRemember = latest?.observation?.subject != null))
+    }
+
     fun recommend() {
-        if (binding == null || zoom.changing || VisionChat.unavailableReason != null) return
+        if (binding == null || zoom.changing || requests.config.validationError(BuildConfig.DEBUG) != null) return
         val now = SystemClock.elapsedRealtimeNanos()
         cancelRecommendation()
         run = null
@@ -382,7 +398,7 @@ internal class CameraSession(
             observer?.pendingFrame?.await(token)
             return
         }
-        val task = VisionChat(token)
+        val task = VisionChat(token.config, token.deadlineNs)
         call = task
         requestGeometry = source.geometry
         onRecommendationStatus("正在推荐构图…")
@@ -392,15 +408,21 @@ internal class CameraSession(
             }
         } }
         network.execute {
-            var sentNs = now
+            var sentNs: Long? = null
             val result = try {
                 val jpeg = sample.use { task.remainingMs(); it.jpeg() }
                 sentNs = SystemClock.elapsedRealtimeNanos()
                 Result.success(task.send(jpeg))
             } catch (e: Exception) { Result.failure(e) }
-            val times = RequestTimes(token.startedNs, sentNs, SystemClock.elapsedRealtimeNanos())
+            val times = RequestTimes(token.config, token.startedNs, sentNs ?: now, SystemClock.elapsedRealtimeNanos())
             main.execute select@{
                 if (requests.active != token) return@select
+                call = null
+                if (sentNs != null) {
+                    onConnection(result.fold(ConnectionResult::fromReply) {
+                        (it as? ModelFailure)?.kind ?: ConnectionResult.UNREACHABLE
+                    })
+                }
                 val analyzer = observer
                 val subject = result.getOrNull()?.subject
                 if (analyzer == null || subject == null) {
@@ -428,6 +450,7 @@ internal class CameraSession(
             return
         }
         val reply = result.getOrElse {
+            recordDecision("REQUEST_FAILED", times, SystemClock.elapsedRealtimeNanos())
             onRecommendationStatus(when (it) {
                 is ModelFailure -> it.notice
                 is SocketTimeoutException -> VisionChat.TIMEOUT_NOTICE
@@ -435,7 +458,7 @@ internal class CameraSession(
             })
             return
         }
-        selection = Selection(reply.name, source.geometry, outline)
+        selection = Selection(token.config.safeText(reply.name), source.geometry, outline)
         fun reject(problem: PlanProblem) {
             observer?.selected = outline
             view.removeCallbacks(drawDirection)
@@ -454,20 +477,21 @@ internal class CameraSession(
         }
         val decided = SystemClock.elapsedRealtimeNanos()
         recordDecision("ACCEPTED", times, decided)
-        Log.i("LumiRecommendation", "aimPoint=(${plan.aimPoint.x},${plan.aimPoint.y}) " +
-            "confidence=${plan.confidence} alreadyGood=${plan.alreadyGood} reason=" + VisionChat.logReason(plan.reason))
+        if (BuildConfig.DEBUG) Log.i("LumiRecommendation", token.config.safeText("aimPoint=(${plan.aimPoint.x},${plan.aimPoint.y}) " +
+            "confidence=${plan.confidence} alreadyGood=${plan.alreadyGood} reason=" + plan.reason))
         onRecommendationStatus(null)
-        startGuide(target, plan.caption) { recordDecision("ACCEPTED", times, decided, SystemClock.elapsedRealtimeNanos()) }
+        startGuide(target, token.config.safeText(plan.caption)) { recordDecision("ACCEPTED", times, decided, SystemClock.elapsedRealtimeNanos()) }
     }
 
-    private data class RequestTimes(val tap: Long, val sent: Long, val replied: Long)
+    private data class RequestTimes(val config: ModelConfig, val tap: Long, val sent: Long, val replied: Long)
 
     private fun recordDecision(outcome: String, times: RequestTimes, decided: Long, firstRing: Long? = null) {
         if (!BuildConfig.DEBUG) return
         fun ms(ns: Long) = ns / 1_000_000
-        val summary = "${System.currentTimeMillis()} outcome=$outcome prepareMs=${ms(times.sent-times.tap)} " +
+        val details = "${System.currentTimeMillis()} outcome=$outcome prepareMs=${ms(times.sent-times.tap)} " +
             "modelMs=${ms(times.replied-times.sent)} verifyMs=${ms(decided-times.replied)}" +
             (firstRing?.let { " firstRingMs=${ms(it-times.tap)}" } ?: "")
+        val summary = times.config.recordText(details, BuildConfig.DEBUG)
         Log.i("LumiRecommendation", summary)
         val history = context.getSharedPreferences("recommendation_outcomes", Context.MODE_PRIVATE)
         history.edit {
