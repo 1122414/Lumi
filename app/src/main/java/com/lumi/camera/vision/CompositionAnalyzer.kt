@@ -1,5 +1,6 @@
 package com.lumi.camera.vision
 
+import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import androidx.camera.core.ExperimentalGetImage
@@ -19,6 +20,7 @@ import com.lumi.camera.guidance.SubjectPosition
 import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.Uv
+import com.lumi.camera.shotplan.SelectedSubject
 import java.util.concurrent.atomic.AtomicReference
 
 internal data class FaceBox(val left: Double, val top: Double, val right: Double, val bottom: Double)
@@ -26,14 +28,21 @@ internal data class SceneFrame(val sequence: Long, val capturedNs: Long, val geo
     val observation: Observation?, val box: FaceBox?, val background: Background?,
     val pixels: SubjectPixels? = null, val follower: SubjectOutline? = null, val outline: SeenOutline? = null)
 
-internal class CompositionAnalyzer(private val optics: CameraOptics, private val poses: CameraPose,
+internal class CompositionAnalyzer(context: Context, private val optics: CameraOptics, private val poses: CameraPose,
     private val keepModelFrame: Boolean, private val deliver: (SceneFrame) -> Unit) : ImageAnalysis.Analyzer, AutoCloseable {
+    private val segmenter = SubjectSegmenter(context.applicationContext)
     private val detector = FaceDetection.getClient(FaceDetectorOptions.Builder()
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).enableTracking().build())
     private var reportedFailure = false
     private val modelFrame = AtomicReference<RecommendationFrame?>()
 
     @Volatile var selected: SubjectOutline? = null
+
+    fun select(source: SceneFrame, subject: SelectedSubject): SubjectOutline? {
+        val observation = source.observation ?: return null
+        val pixels = source.pixels ?: return null
+        return SubjectOutline.from(observation, subject, pixels, segmenter::segment)
+    }
 
     // Taking transfers ownership; the analysis worker can immediately replace the slot.
     fun takeModelFrame(): RecommendationFrame? = modelFrame.getAndSet(null)
@@ -96,5 +105,6 @@ internal class CompositionAnalyzer(private val optics: CameraOptics, private val
     override fun close() {
         takeModelFrame()?.close()
         detector.close()
+        segmenter.close()
     }
 }

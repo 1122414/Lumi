@@ -63,6 +63,22 @@ class RotationGuidanceTest {
         assertNull(direction.display(lost, null, start).ring)
     }
 
+    @Test fun lostVisibleSubjectPausesTheSameRecommendationAndOffscreenOffersOnlyABearing() {
+        val direction = ReturnDirection(target, target, listOf(Uv(0.3,0.2),Uv(0.7,0.2),Uv(0.7,0.8),Uv(0.3,0.8)))
+        val missing = Guide(null, evidence = GuideEvidence.NO_FACE)
+        assertNull(direction.display(missing, null, right(12.0)).ring)
+        val back = direction.display(missing, null, right(100.0))
+        assertEquals(GuideEvidence.RETURN_DIRECTION, back.evidence)
+        assertFalse(back.ready)
+        assertNull(direction.display(missing, null, right(100.0), subjectVisible=true).ring)
+        val guidance = RotationGuidance(target, verifyScene=true)
+        for (t in 0L..450L step 50) guidance.feed(sample(t))
+        val changed = sample(900)
+        assertNull(guidance.update(changed, changed.timeNs, false).ring)
+        for (t in 950L..1250L step 50) assertFalse(guidance.feed(sample(t)).ready)
+        assertTrue(guidance.feed(sample(1300)).ready)
+    }
+
     @Test fun aimingRightMovesRingLeftAndAimingUpMovesItDown() {
         val d = tan(Math.toRadians(12.0))
         for ((pose, expected) in listOf(right(12.0) to Uv(0.5 - lens.fx*d, 0.5),

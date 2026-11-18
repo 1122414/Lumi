@@ -33,8 +33,16 @@ class SubjectOutlineTest {
         return SubjectPixels(120,160,data)
     }
 
+    private val segment: SegmentAt = { image, seed ->
+        val values = ByteArray(image.width*image.height) { i ->
+            val color = image.at((i%image.width+0.5)/image.width, (i/image.width+0.5)/image.height)
+            if (color == 0xdc6c99) 0 else 255.toByte()
+        }
+        ForegroundMask.at(image.width,image.height,values,seed)
+    }
+
     @Test fun contourFollowsCameraRotationAndImageMotionAndKeepsTheNotchBetweenEars() {
-        val outline = SubjectOutline.from(source, toy.outline, image())!!
+        val outline = SubjectOutline.from(source, toy, image(), segment)!!
         for (i in 0..8) {
             val halfAngle = Math.toRadians(i * 0.7) / 2
             val now = source.copy(timeNs = (i+1)*40_000_000L, pose = Pose(cos(halfAngle),0.0,-sin(halfAngle),0.0))
@@ -48,19 +56,19 @@ class SubjectOutlineTest {
             assertTrue("notch at frame $i", observed.minOf { it.distance(notch) } < 0.034)
             assertTrue("ear at frame $i", observed.minOf { it.distance(tip) } < 0.034)
             val center = projection.project(Uv(0.365 + dx, 0.453 + dy))!!
-            assertEquals(center.x, seen.subject!!.center.x, 0.035)
+            assertEquals(center.x, seen.position.center.x, 0.035)
         }
     }
 
     @Test fun hidingTheSelectedToyDoesNotTransferItsOutlineToTheNeighbour() {
-        val outline = SubjectOutline.from(source, toy.outline, image())!!
+        val outline = SubjectOutline.from(source, toy, image(), segment)!!
         val covered = source.copy(timeNs = 100_000_000L)
         assertNull(outline.observe(covered, image(covered = true)))
         val away = source.copy(timeNs = 200_000_000L, pose = Pose(0.5,0.0,0.8660254038,0.0))
         assertNull(outline.observe(away, image(pose = away)))
         val back = source.copy(timeNs = 800_000_000L)
-        assertNotNull(outline.observe(back, image())?.subject)
-        assertNull(SubjectOutline.from(source, toy.outline, SubjectPixels(120,160,IntArray(120*160))))
+        assertTrue(outline.observe(back, image())!!.complete)
+        assertNull(SubjectOutline.from(source, toy, SubjectPixels(120,160,IntArray(120*160)), segment))
     }
 
     @Test fun nonHumanRecommendationCanReachReadyWithoutAnyFaceAndRejectsAnotherTargetsOutline() {
@@ -70,7 +78,7 @@ class SubjectOutlineTest {
         val background = Background(IntArray(40*52))
         val pixels = image()
         val frame = SceneFrame(1,0,geometry,source,null,background,pixels)
-        val target = RememberedComposition.from(frame, plan)!!
+        val target = RememberedComposition.from(frame, plan, SubjectOutline.from(source, toy, pixels, segment))!!
         val follower = target.outline!!
         val guidance = RotationGuidance(target.observation)
         var ready = false
@@ -81,7 +89,7 @@ class SubjectOutlineTest {
             ready = guidance.update(current, now.timeNs, true).ready
         }
         assertTrue(ready)
-        val obsolete = SubjectOutline.from(source,toy.outline,pixels)
+        val obsolete = SubjectOutline.from(source,toy,pixels,segment)
         assertNull(target.current(frame.copy(follower = obsolete, outline = follower.observe(source,pixels)))!!.subject)
     }
 
@@ -91,12 +99,59 @@ class SubjectOutlineTest {
             null, Background(IntArray(40*52)), pixels)
         val plan = Recommendation.validated(mapOf("aimPoint" to mapOf("x" to 0.55, "y" to 0.5),
             "confidence" to 0.86, "alreadyGood" to false, "reason" to "玩偶耳边留白", "subject" to fields))!!
-        val target = RememberedComposition.from(frame, plan)!!
+        val target = RememberedComposition.from(frame, plan, SubjectOutline.from(source, toy, pixels, segment))!!
         val seen = target.outline!!.observe(source, pixels)!!
         assertTrue(seen.points.any { it != null })
-        assertNull(seen.subject)
+        assertFalse(seen.complete)
         val current = target.current(frame.copy(follower = target.outline, outline = seen))!!
-        assertFalse(RotationGuidance(target.observation).update(current, current.timeNs, true).ready)
+        val guidance = RotationGuidance(target.observation, verifyScene=true)
+        for (i in 1..10) {
+            val next = current.copy(timeNs = i*50_000_000L)
+            val guide = guidance.update(next,next.timeNs,true)
+            assertNotNull(guide.ring)
+            assertFalse(guide.ready)
+        }
+    }
+
+    @Test fun theSelectedComponentExcludesSeparateBackgroundObjectsAndInteriorHoles() {
+        val w = 100
+        val mask = ByteArray(w*w) { i ->
+            val x=i%w
+            val y=i/w
+            val toy = x in 10..49 && y in 20..85 && !(x in 20..30 && y in 30..48)
+            val mirror = x in 60..89 && y in 10..45
+            if (toy || mirror) 0 else 255.toByte()
+        }
+        val shape = ForegroundMask.at(w,w,mask,Uv(0.37,0.5))!!
+        assertFalse(shape.contains(Uv(0.75,0.2)))
+        assertFalse(shape.contains(Uv(0.25,0.38)))
+        val path = shape.points.filterNotNull()
+        assertTrue(path.all { it.x==0.10 || it.x==0.50 || it.y==0.20 || it.y==0.86 })
+        assertTrue((path + path.first()).zipWithNext().all { (a,b) -> a.distance(b) < 0.015 })
+    }
+
+    @Test fun aMirrorJoinedToTheHatDoesNotIntroduceAFakeClosingLine() {
+        val w = 100
+        val data = ByteArray(w*w) { i ->
+            val x = i%w
+            val y = i/w
+            if ((x in 20..59 && y in 36..84) || (x in 33..45 && y in 8..46)) 0 else -1
+        }
+        val seed = Uv(0.4,0.56)
+        val raw = ForegroundMask.at(w,w,data,seed)!!
+        val selected = raw.constrained(listOf(Uv(.2,.36),Uv(.6,.36),Uv(.6,.85),Uv(.2,.85)),seed)!!
+        assertTrue(selected.points.any { it == null })
+        assertTrue(selected.points.filterNotNull().all { it.y >= 0.33 })
+        assertFalse(selected.contains(Uv(.40,.17)))
+    }
+
+    @Test fun plainBackgroundStillHasToMatchWhenTexturesAreAbsent() {
+        val wall = Background(IntArray(40*52) { 170 })
+        val marks = wall.record(toy.bounds, wholeSubject=true)
+        val samePose = RotationProjection(source,source)
+        assertTrue(wall.agrees(marks,samePose))
+        assertFalse(Background(IntArray(40*52) { 45 }).agrees(marks,samePose))
+        assertFalse(wall.agrees(emptyList(),samePose))
     }
 
     @Test fun malformedAndSelfCrossingSubjectPolygonsAreRejected() {

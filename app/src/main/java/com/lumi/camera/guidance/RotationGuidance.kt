@@ -30,7 +30,8 @@ internal data class Pose(val w: Double, val x: Double, val y: Double, val z: Dou
 // Focal lengths and principal point in normalized upright ViewPort coordinates.
 internal data class Lens(val fx: Double, val fy: Double, val cx: Double, val cy: Double)
 internal data class SubjectPosition(val id: Int, val center: Uv, val width: Double)
-internal data class Observation(val timeNs: Long, val pose: Pose, val lens: Lens, val subject: SubjectPosition?)
+internal data class Observation(val timeNs: Long, val pose: Pose, val lens: Lens, val subject: SubjectPosition?,
+    val completeSubject: Boolean = true)
 
 internal class RotationProjection(target: Observation, current: Observation) {
     private val a = target.lens
@@ -60,22 +61,31 @@ internal class RotationProjection(target: Observation, current: Observation) {
     }
 }
 
-internal enum class GuideEvidence { CONFIRMED, BACKGROUND_UNCERTAIN, FACE_GAP, NO_FACE, OTHER_FACE, MISMATCH, NO_OBSERVATION, STALE, RETURN_DIRECTION }
+internal enum class GuideEvidence { CONFIRMED, PARTIAL_SUBJECT, BACKGROUND_UNCERTAIN, FACE_GAP, NO_FACE, OTHER_FACE, MISMATCH, NO_OBSERVATION, STALE, RETURN_DIRECTION }
 
 internal data class Guide(val ring: Uv?, val ready: Boolean = false,
     val evidence: GuideEvidence = GuideEvidence.NO_OBSERVATION, val merged: Boolean = ready) {
     val trusted get() = evidence == GuideEvidence.CONFIRMED
 }
 
-internal class ReturnDirection(private val target: Observation) {
+internal class ReturnDirection(private val target: Observation, private val source: Observation = target,
+    private val subjectCorners: List<Uv> = emptyList()) {
     private var previousEdge = Uv(1.0, 0.5)
 
-    fun display(visual: Guide, observed: Observation?, livePose: Pose?): Guide {
+    fun display(visual: Guide, observed: Observation?, livePose: Pose?, subjectVisible: Boolean = false): Guide {
         val pose = livePose ?: observed?.pose ?: return visual
         val live = target.copy(pose = pose, lens = observed?.lens ?: target.lens)
         val goal = RotationProjection(target, live).onView(Uv.CENTER, previousEdge)
         val atEdge = maxOf(abs(goal.x - 0.5), abs(goal.y - 0.5)) >= 0.499999
         if (atEdge) previousEdge = goal
+        if (subjectCorners.isNotEmpty() && visual.ring == null) {
+            val projection = RotationProjection(source, live)
+            val corners = subjectCorners.mapNotNull(projection::project)
+            val outside = corners.isEmpty() || (corners.size == subjectCorners.size &&
+                (corners.all { it.x < 0 } || corners.all { it.x > 1 } ||
+                 corners.all { it.y < 0 } || corners.all { it.y > 1 }))
+            if (subjectVisible || !outside || !atEdge) return visual
+        }
         if (atEdge || (goal.distance(Uv.CENTER) > 0.045 && (visual.ring == null || visual.merged || visual.ready))) {
             return Guide(goal, evidence = GuideEvidence.RETURN_DIRECTION)
         }
@@ -87,13 +97,14 @@ internal class ReturnDirection(private val target: Observation) {
     }
 }
 
-internal class RotationGuidance(private val target: Observation) {
+internal class RotationGuidance(private val target: Observation, private val verifyScene: Boolean = false) {
     private val subject = requireNotNull(target.subject)
     private var previous: Observation? = null
     private var since: Long? = null
     private var count = 0
     private var lastTimestamp = target.timeNs - 1
     private var lastFaceNs: Long? = null
+    private var lastBackgroundNs: Long? = null
     private var lastReadyNs: Long? = null
     private var displayAim = Uv.CENTER
 
@@ -106,6 +117,7 @@ internal class RotationGuidance(private val target: Observation) {
     fun lost(reason: GuideEvidence = GuideEvidence.NO_OBSERVATION): Guide {
         resetHold()
         lastFaceNs = null
+        lastBackgroundNs = null
         lastReadyNs = null
         displayAim = Uv.CENTER
         return Guide(null, evidence = reason)
@@ -153,9 +165,17 @@ internal class RotationGuidance(private val target: Observation) {
         val near = offset <= 0.045 && faceOffset <= 0.055 && width in 0.80..1.24 && angle <= 4.0
         if (!backgroundAgrees) {
             resetHold()
+            if (verifyScene && lastBackgroundNs?.let { nowNs-it in 0..350_000_000L } != true)
+                return lost(GuideEvidence.BACKGROUND_UNCERTAIN)
             return Guide(ring, evidence = GuideEvidence.BACKGROUND_UNCERTAIN, merged = recentlyMerged(nowNs, near))
         }
 
+        lastBackgroundNs = current.timeNs
+        if (!current.completeSubject) {
+            resetHold()
+            lastReadyNs = null
+            return Guide(ring, evidence = GuideEvidence.PARTIAL_SUBJECT)
+        }
         val prior = previous
         previous = current
         val dt = prior?.let { current.timeNs - it.timeNs } ?: 0L

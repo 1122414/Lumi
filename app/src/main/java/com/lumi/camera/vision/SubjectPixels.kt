@@ -10,10 +10,27 @@ internal class SubjectPixels(val width: Int, val height: Int, private val pixels
         return pixels[(y * height).toInt() * width + (x * width).toInt()]
     }
 
+    fun crop(x: Int, y: Int, w: Int, h: Int): SubjectPixels {
+        val out = IntArray(w*h)
+        for (row in 0 until h) pixels.copyInto(out, row*w, (y+row)*width+x, (y+row)*width+x+w)
+        return SubjectPixels(w,h,out)
+    }
+
+    fun argb() = IntArray(pixels.size) { i ->
+        val value = pixels[i]
+        val y = (value shr 16) - 16
+        val u = (value shr 8 and 255) - 128
+        val v = (value and 255) - 128
+        val r = ((298*y + 409*v + 128) shr 8).coerceIn(0,255)
+        val g = ((298*y - 100*u - 208*v + 128) shr 8).coerceIn(0,255)
+        val b = ((298*y + 516*u + 128) shr 8).coerceIn(0,255)
+        (255 shl 24) or (r shl 16) or (g shl 8) or b
+    }
+
     companion object {
         fun read(image: ImageProxy, frame: FrameGeometry): SubjectPixels {
             val ref = frame.referenceSize
-            val height = 160
+            val height = 256
             val width = (height * ref.width / ref.height).coerceIn(48, 240)
             val planes = image.planes
             val y = planes[0]

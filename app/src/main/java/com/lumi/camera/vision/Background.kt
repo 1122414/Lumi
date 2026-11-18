@@ -21,22 +21,23 @@ internal class Background(private val grid: IntArray) {
         return (1-v)*((1-u)*grid[i] + u*grid[i+1]) + v*((1-u)*grid[i+W] + u*grid[i+W+1])
     }
 
-    fun record(face: FaceBox): List<BackgroundMark> {
+    fun record(face: FaceBox, wholeSubject: Boolean = false): List<BackgroundMark> {
         val marks = mutableListOf<BackgroundMark>()
+        val plain = mutableListOf<BackgroundMark>()
         for (j in 1..5) for (i in 1..5) {
             val x = i / 6.0
             val y = j / 6.0
-            if (x in face.left-0.10..face.right+0.10 && y >= face.top-0.08) continue
+            if (x in face.left-0.10..face.right+0.10 && y >= face.top-0.08 && (!wholeSubject || y <= face.bottom+0.08)) continue
             val mark = listOf(Uv(x,y), Uv(x-0.035,y), Uv(x+0.035,y), Uv(x,y-0.035), Uv(x,y+0.035))
                 .map { Probe(it, light(it)!!) }
-            if (mark.maxOf { it.light } - mark.minOf { it.light } >= 24) marks.add(mark)
+            if (mark.maxOf { it.light } - mark.minOf { it.light } >= 24) marks.add(mark) else plain.add(mark)
         }
-        return marks
+        return marks.ifEmpty { plain }
     }
 
     // Check saved contrasts at their attitude-predicted positions; no moving patch tracker.
     fun agrees(marks: List<BackgroundMark>, projection: RotationProjection): Boolean {
-        if (marks.isEmpty()) return true
+        if (marks.isEmpty()) return false
         var agrees = 0
         var visible = 0
         for (mark in marks) {
@@ -45,6 +46,10 @@ internal class Background(private val grid: IntArray) {
             visible++
             val oldMean = mark.sumOf { it.light } / mark.size
             val mean = now.average()
+            if (mark.maxOf { it.light } - mark.minOf { it.light } < 24) {
+                if (kotlin.math.abs(mean-oldMean) <= 24 && now.max()-now.min() < 32) agrees++
+                continue
+            }
             var dot = 0.0; var aa = 0.0; var bb = 0.0
             for (i in now.indices) {
                 val a = mark[i].light - oldMean

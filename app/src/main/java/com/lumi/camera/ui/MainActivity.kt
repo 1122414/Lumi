@@ -188,7 +188,8 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
                 frame.ready -> "可以拍"
                 !bound -> "正在打开后置相机"
                 recommendationStatus != null -> recommendationStatus.orEmpty()
-                frame.hasTarget && frame.ring == null -> "构图暂不可确认"
+                frame.hasTarget && frame.ring == null -> "正在核对主体与背景"
+                frame.returning -> "返回原构图"
                 frame.hasTarget -> "构图引导中"
                 else -> "对准想拍的人或物"
             }, color = Color.White, fontSize = 14.sp)

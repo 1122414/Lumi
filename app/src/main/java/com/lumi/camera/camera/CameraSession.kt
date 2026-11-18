@@ -47,7 +47,7 @@ import java.util.concurrent.Executors
 
 internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: Boolean = false,
     val ring: Point? = null, val ready: Boolean = false, val merged: Boolean = false, val reason: String? = null,
-    val outline: List<Point?> = emptyList())
+    val outline: List<Point?> = emptyList(), val returning: Boolean = false)
 
 internal class CameraSession(
     private val view: PreviewView,
@@ -75,8 +75,10 @@ internal class CameraSession(
     private val future = ProcessCameraProvider.getInstance(context)
     private val displays = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private class Run(val target: RememberedComposition, val reason: String?) {
-        val guidance = RotationGuidance(target.observation)
-        val direction = ReturnDirection(target.observation)
+        val guidance = RotationGuidance(target.observation, verifyScene = target.outline != null)
+        val direction = ReturnDirection(target.observation, target.backgroundSource, target.outline?.bounds?.let {
+            listOf(Uv(it.left,it.top), Uv(it.right,it.top), Uv(it.right,it.bottom), Uv(it.left,it.bottom))
+        }.orEmpty())
         var visual = Guide(null)
         private var lastEvidence: GuideEvidence? = null
         private var lastReady = false
@@ -169,7 +171,7 @@ internal class CameraSession(
             val sensors = CameraPose(context, rotation)
             poses = sensors
             if (!sensors.start()) onMessage("此设备的旋转矢量传感器不可用。")
-            val analyzer = CompositionAnalyzer(CameraOptics(camera.cameraInfo, readings), sensors,
+            val analyzer = CompositionAnalyzer(context, CameraOptics(camera.cameraInfo, readings), sensors,
                 keepModelFrame = VisionChat.unavailableReason == null) { result ->
                 main.execute {
                     if (frames.accept(generation, 0, result.sequence)) receive(result)
@@ -232,14 +234,14 @@ internal class CameraSession(
         }
         val visual = if (fresh != null && active != null) active.visual else Guide(null, evidence = GuideEvidence.STALE)
         val pose = poses?.latestAt(now)
-        val guide = active?.direction?.display(visual, current, pose) ?: Guide(null)
+        val seen = fresh?.outline?.takeIf { fresh.follower === identified?.outline }
+        val guide = active?.direction?.display(visual, current, pose, seen != null) ?: Guide(null)
         if (active != null && guide.evidence == GuideEvidence.RETURN_DIRECTION && (visual.ready || visual.merged)) {
             active.visual = active.guidance.lost()
         }
         val ref = geometry.referenceSize
         val mapping = FrameMapping(geometry, size)
         fun preview(p: Uv) = mapping.referenceToPreview(Point((p.x * ref.width).toFloat(), (p.y * ref.height).toFloat()))
-        val seen = fresh?.outline?.takeIf { fresh.follower === identified?.outline }
         val outline = if (seen == null || current == null) emptyList() else {
             val projection = pose?.let { RotationProjection(current, current.copy(pose = it)) }
             seen.points.map { point ->
@@ -249,7 +251,7 @@ internal class CameraSession(
         }
         active?.trace(guide, outline.any { it != null }, now)
         onFrame(Viewfinder(current?.subject != null, active != null, guide.ring?.let(::preview), guide.ready,
-            guide.merged, active?.reason ?: identified?.name, outline))
+            guide.merged, active?.reason ?: identified?.name, outline, guide.evidence == GuideEvidence.RETURN_DIRECTION))
     }
 
     private fun startGuide(target: RememberedComposition, reason: String? = null) {
@@ -311,12 +313,25 @@ internal class CameraSession(
                 Result.success(task.send(jpeg))
             } catch (e: Exception) { Result.failure(e) }
             val elapsed = SystemClock.elapsedRealtime() - sentAtMs
-            main.execute { finishRecommendation(token, source, result, elapsed) }
+            main.execute select@{
+                if (requests.active != token) return@select
+                val analyzer = observer
+                val subject = result.getOrNull()?.subject
+                if (analyzer == null || subject == null) {
+                    finishRecommendation(token, source, result, elapsed, null)
+                } else worker.execute {
+                    val outline = try { analyzer.select(source, subject) } catch (e: RuntimeException) {
+                        Log.w("LumiCamera", "Subject segmentation unavailable", e)
+                        null
+                    }
+                    main.execute { finishRecommendation(token, source, result, elapsed, outline) }
+                }
+            }
         }
     }
 
     private fun finishRecommendation(token: RequestToken, source: SceneFrame,
-        result: Result<ModelReply>, elapsedMs: Long) {
+        result: Result<ModelReply>, elapsedMs: Long, outline: SubjectOutline?) {
         val completion = requests.finish(token, SystemClock.elapsedRealtimeNanos())
         if (completion == RecommendationRequests.Completion.OBSOLETE) return
         handler.removeCallbacks(timeout)
@@ -334,11 +349,6 @@ internal class CameraSession(
             })
             return
         }
-        val selected = reply.subject
-        val pose = source.observation
-        val pixels = source.pixels
-        val outline = if (selected != null && pose != null && pixels != null)
-            SubjectOutline.from(pose, selected.outline, pixels) else null
         selection = Selection(reply.name, source.geometry, outline)
         val plan = reply.plan
         val target = if (plan != null && outline != null) RememberedComposition.from(source, plan, outline) else null

@@ -4,134 +4,203 @@ import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.guidance.SubjectPosition
 import com.lumi.camera.guidance.Uv
+import com.lumi.camera.shotplan.SelectedSubject
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.hypot
 
-internal data class SeenOutline(val points: List<Uv?>, val subject: SubjectPosition?)
+internal data class SeenOutline(val mask: ForegroundMask, val position: SubjectPosition, val complete: Boolean) {
+    val points get() = mask.points
+}
+internal typealias SegmentAt = (SubjectPixels, Uv) -> ForegroundMask?
 
-// The model supplies an ordered silhouette. Each anchor remembers the two colours on
-// opposite sides of its edge in the sent frame. Only fresh matching edges are drawn.
-internal class SubjectOutline private constructor(private val source: Observation, private val anchors: List<Anchor>) {
-    private data class Anchor(val at: Uv, val inside: Uv, val outside: Uv, val inner: Int, val outer: Int)
-    private var positions = anchors.map { it.at }
-    private var lastSeenNs: Long? = null
+// The source appearance is immutable. Matching locates a prompt inside the same instance;
+// it never supplies vertices for drawing. All blue pixels come from the current mask.
+internal class SubjectOutline private constructor(private val source: Observation, private val seed: Uv,
+    private val original: ForegroundMask, private val selection: List<Uv>, private val referenceComplete: Boolean, private val samples: List<Sample>, private val segment: SegmentAt) {
+    private data class Sample(val p: Uv, val color: Int)
+    val bounds get() = original.bounds
+    val sourceSubject = position(original)
+    fun containsAtCapture(p: Uv) = original.contains(p)
+    private var lastSeed = seed
+    private var lastScale = 1.0
+    private val distinctive = samples.any { a -> samples.count { colorError(a.color,it.color)>52 } >= samples.size/3 }
+    private var lastTime = source.timeNs
+    private var retrySource = false
 
     fun observe(current: Observation, image: SubjectPixels): SeenOutline? {
+        val recovering = retrySource
+        val seen = if (recovering) recover(current,image) else match(current,image)
+        retrySource = seen == null && !recovering
+        return seen
+    }
+
+    private fun match(current: Observation, image: SubjectPixels): SeenOutline? {
         val projection = RotationProjection(source, current)
-        val reverse = RotationProjection(current, source)
-        val continuous = lastSeenNs?.let { current.timeNs - it in 1..400_000_000L } == true
-        data class Probe(val center: Uv, val dx: Double, val dy: Double, val edge: Edge?)
+        val continuous = current.timeNs - lastTime in 0..500_000_000L
+        val base = if (continuous) lastSeed else seed
+        val predicted = projection.project(base) ?: return null
+        val projected = samples.mapNotNull {
+            val p = projection.project(Uv(it.p.x + base.x - seed.x, it.p.y + base.y - seed.y))
+            p?.let { point -> Sample(point, it.color) }
+        }
+        if (projected.size < 5) return null
+        var bestCost = Double.POSITIVE_INFINITY
+        var at = predicted
+        var scale = 1.0
+        fun locate(reach: Int, step: Double, scales: List<Double>) {
+            for (factor in scales) for (y in -reach..reach) for (x in -reach..reach) {
+                val dx = x*step
+                val dy = y*step
+                val cx = predicted.x+dx
+                val cy = predicted.y+dy
+                if (cx !in 0.0..<1.0 || cy !in 0.0..<1.0) continue
+                var visible = 0
+                var error = 0.0
+                for (sample in projected) {
+                    val color = image.at(cx+(sample.p.x-predicted.x)*factor, cy+(sample.p.y-predicted.y)*factor) ?: continue
+                    visible++
+                    error += colorError(color,sample.color).coerceAtMost(95.0)
+                }
+                if (visible < maxOf(5,projected.size/3)) continue
+                val cost = error/visible + 16*hypot(dx,dy) + 6*abs(factor-lastScale) + 4.0*(1-visible.toDouble()/projected.size)
+                if (cost < bestCost) { bestCost = cost; at = Uv(cx,cy); scale = factor }
+            }
+        }
+        locate(4, 0.032, listOf(lastScale,1.0,0.80,1.18))
+        if (distinctive && bestCost > 19) locate(10,0.042,listOf(0.75,0.9,1.0,1.2))
+        if (!bestCost.isFinite()) return null
+        fun shifted(p: Uv) = Uv(at.x+(p.x-predicted.x)*scale, at.y+(p.y-predicted.y)*scale)
+        val projectedSelection = selection.mapNotNull {
+            projection.project(Uv(it.x+base.x-seed.x,it.y+base.y-seed.y))?.let(::shifted)
+        }
+        if (projectedSelection.size != selection.size) return null
+        val box = FaceBox(projectedSelection.minOf { it.x },projectedSelection.minOf { it.y },
+            projectedSelection.maxOf { it.x },projectedSelection.maxOf { it.y })
+        val raw = within(image, at, box, segment) ?: return null
+        // Register the prior to the measured component as a whole. A prompt is an interior
+        // point, not a measurement of the position or scale of the outline.
+        fun align(v: Double, lo: Double, hi: Double, foundLo: Double, foundHi: Double): Double {
+            val width = hi-lo
+            if (width <= 0) return v
+            val tolerance = width * 0.18
+            val a = if (foundLo > 0 && abs(foundLo-lo) <= tolerance) foundLo else lo
+            val b = if (foundHi < 1 && abs(foundHi-hi) <= tolerance) foundHi else hi
+            return a + (v-lo)*(b-a)/width
+        }
+        fun aligned(p: Uv) = Uv(align(p.x,box.left,box.right,raw.bounds.left,raw.bounds.right),
+            align(p.y,box.top,box.bottom,raw.bounds.top,raw.bounds.bottom))
+        val mask = raw.constrained(projectedSelection.map(::aligned),at) ?: return null
+        val b = mask.bounds
+        val clipped = b.left == 0.0 || b.top == 0.0 || b.right == 1.0 || b.bottom == 1.0
         var visible = 0
-        var xx = 0.0
-        var xy = 0.0
-        var yy = 0.0
-        var bx = 0.0
-        var by = 0.0
-        val probes = anchors.mapIndexed { i, anchor ->
-            val center = projection.project(if (continuous) positions[i] else anchor.at) ?: return@mapIndexed null
-            if (center.x !in -0.04..1.04 || center.y !in -0.04..1.04) return@mapIndexed null
+        var confirmed = 0
+        for (sample in projected) {
+            val p = aligned(shifted(sample.p))
+            val color = image.at(p.x,p.y) ?: continue
             visible++
-            if (anchor.inner == anchor.outer) return@mapIndexed null
-            val inside = projection.project(anchor.inside) ?: return@mapIndexed null
-            val outside = projection.project(anchor.outside) ?: return@mapIndexed null
-            val dx = (inside.x - outside.x) / 2
-            val dy = (inside.y - outside.y) / 2
-            val edge = findEdge(image, center, dx, dy, anchor)
-            if (edge != null) {
-                // Each edge measures motion along its normal. Together they also locate corners
-                // when the phone translates and the silhouette slides along a straight edge.
-                val length = hypot(dx, dy)
-                val nx = dx / length
-                val ny = dy / length
-                val movement = (edge.at.x - center.x)*nx + (edge.at.y - center.y)*ny
-                xx += nx*nx
-                xy += nx*ny
-                yy += ny*ny
-                bx += movement*nx
-                by += movement*ny
-            }
-            Probe(center, dx, dy, edge)
+            if (mask.contains(p) && colorError(color,sample.color) <= 50.0) confirmed++
         }
-        val determinant = xx*yy - xy*xy
-        val tx = if (determinant > 1.0) ((bx*yy - by*xy)/determinant).coerceIn(-0.05, 0.05) else 0.0
-        val ty = if (determinant > 1.0) ((by*xx - bx*xy)/determinant).coerceIn(-0.05, 0.05) else 0.0
-        val points = probes.mapIndexed { i, p ->
-            if (p == null) null else if (abs(tx) + abs(ty) < 0.002) p.edge?.at else {
-                val center = Uv(p.center.x + tx, p.center.y + ty)
-                findEdge(image, center, p.dx, p.dy, anchors[i])?.at
-            }
+        // Independently verify the colours of the *current* component against the locked
+        // instance. Partial visibility changes which parts of the original can be compared.
+        var total = 0
+        var same = 0
+        for (row in 0 until 8) for (col in 0 until 6) {
+            val p = Uv(b.left+(col+0.5)*(b.right-b.left)/6, b.top+(row+0.5)*(b.bottom-b.top)/8)
+            if (!mask.contains(p)) continue
+            val color = image.at(p.x,p.y) ?: continue
+            total++
+            if (samples.any { colorError(color,it.color) <= 35.0 }) same++
         }
-        val count = points.count { it != null }
-        if (count < 5 || count < visible * 0.50) return null
-        lastSeenNs = current.timeNs
-        positions = points.mapIndexed { i, p -> p?.let(reverse::project) ?: if (continuous) positions[i] else anchors[i].at }
-        val seen = points.filterNotNull()
-        val subject = if (count >= anchors.size * 0.72 && visible == anchors.size) {
-            val left = seen.minOf { it.x }
-            val right = seen.maxOf { it.x }
-            val center = Uv((left + right) / 2, (seen.minOf { it.y } + seen.maxOf { it.y }) / 2)
-            SubjectPosition(0, center, right - left)
-        } else null
-        return SeenOutline(points, subject)
+        if (total < 5 || same < total*0.72 || confirmed < maxOf(4,(visible*0.40).toInt())) return null
+        val fraction = mask.area.toDouble() / (mask.width*mask.height)
+        val reference = original.area.toDouble() / (original.width*original.height)
+        if (fraction/reference !in 0.20..1.85) return null
+        val subject = position(mask)
+        val entire = referenceComplete && !clipped && fraction/reference in 0.7..1.45 && confirmed >= samples.size*0.68
+        // Use the measured mask centre to correct gradual drift only when it is wholly visible.
+        val corrected = if (entire) {
+            val center = projection.project(Uv(sourceSubject.center.x+base.x-seed.x, sourceSubject.center.y+base.y-seed.y))
+            if (center == null) at else Uv(at.x + subject.center.x-shifted(center).x, at.y + subject.center.y-shifted(center).y)
+        } else at
+        lastSeed = RotationProjection(current,source).project(corrected) ?: base
+        lastScale = scale
+        lastTime = current.timeNs
+        return SeenOutline(mask, subject, entire)
+    }
+
+    // After a miss the old crop may itself exclude the subject. Re-segment the full view,
+    // then verify corresponding interior colours before adopting the newly measured bounds.
+    private fun recover(current: Observation, image: SubjectPixels): SeenOutline? {
+        val at = RotationProjection(source,current).project(seed) ?: return null
+        if (at.x !in 0.0..<1.0 || at.y !in 0.0..<1.0) return null
+        val raw = segment(image,at) ?: return null
+        val b = raw.bounds
+        if (b.left == 0.0 || b.top == 0.0 || b.right == 1.0 || b.bottom == 1.0) return null
+        val sx = (b.right-b.left)/(bounds.right-bounds.left)
+        val sy = (b.bottom-b.top)/(bounds.bottom-bounds.top)
+        if (sx !in 0.55..1.5 || sy !in 0.55..1.5 || sx/sy !in 0.65..1.5) return null
+        fun register(p: Uv) = Uv(b.left+(p.x-bounds.left)*sx, b.top+(p.y-bounds.top)*sy)
+        val mask = raw.constrained(selection.map(::register),at) ?: return null
+        val hits = samples.count {
+            val p = register(it.p)
+            val color = image.at(p.x,p.y)
+            color != null && mask.contains(p) && colorError(color,it.color) <= 50.0
+        }
+        if (hits < samples.size*0.60) return null
+        lastSeed = RotationProjection(current,source).project(register(seed)) ?: return null
+        lastScale = (sx+sy)/2
+        lastTime = current.timeNs
+        return SeenOutline(mask,position(mask),referenceComplete && hits >= samples.size*0.72)
     }
 
     companion object {
-        private data class Edge(val at: Uv, val inner: Int, val outer: Int)
-
-        private fun colorDistance(a: Int, b: Int): Int =
-            abs((a shr 16) - (b shr 16)) + abs((a shr 8 and 255) - (b shr 8 and 255)) + abs((a and 255) - (b and 255))
-
-        private fun findEdge(image: SubjectPixels, center: Uv, dx: Double, dy: Double, anchor: Anchor?): Edge? {
-            var best: Edge? = null
-            var bestScore = Double.NEGATIVE_INFINITY
-            for (step in -6..6) {
-                val x = center.x + step * dx * 0.55
-                val y = center.y + step * dy * 0.55
-                val inner = image.at(x + dx, y + dy) ?: continue
-                val outer = image.at(x - dx, y - dy) ?: continue
-                val contrast = colorDistance(inner, outer)
-                if (contrast < 24) continue
-                val score = if (anchor == null) contrast.coerceAtMost(120).toDouble() else {
-                    val direct = colorDistance(inner, anchor.inner) + colorDistance(outer, anchor.outer)
-                    val swapped = colorDistance(inner, anchor.outer) + colorDistance(outer, anchor.inner)
-                    if (direct > 135 || direct + 18 >= swapped) continue
-                    -direct.toDouble()
-                } - abs(step) * 4.0
-                if (score > bestScore) {
-                    best = Edge(Uv(x,y), inner, outer)
-                    bestScore = score
-                }
-            }
-            return best
+        private fun position(mask: ForegroundMask): SubjectPosition {
+            val b = mask.bounds
+            return SubjectPosition(0, Uv((b.left+b.right)/2, (b.top+b.bottom)/2), b.right-b.left)
         }
 
-        fun from(source: Observation, polygon: List<Uv>, image: SubjectPixels): SubjectOutline? {
-            val anchors = mutableListOf<Anchor>()
-            var attempted = 0
-            for (i in polygon.indices) {
-                val a = polygon[i]
-                val b = polygon[(i + 1) % polygon.size]
-                val x = b.x - a.x
-                val y = b.y - a.y
-                val length = hypot(x,y)
-                if (length <= 0.0) continue
-                val dx = -y / length * 0.014
-                val dy = x / length * 0.014
-                val samples = ceil(length / 0.018).toInt()
-                attempted += samples
-                for (j in 0 until samples) {
-                    val f = (j + 0.5) / samples
-                    val p = Uv(a.x + x*f, a.y + y*f)
-                    val edge = findEdge(image, p, dx, dy, null)
-                    // Keep gaps in the polygon order. A flat edge must not become a chord across the subject.
-                    val at = edge?.at ?: p
-                    anchors.add(Anchor(at, Uv(at.x+dx, at.y+dy), Uv(at.x-dx, at.y-dy),
-                        edge?.inner ?: 0, edge?.outer ?: 0))
-                }
+        private fun colorError(a: Int, b: Int): Double = 0.55*abs((a shr 16)-(b shr 16)) +
+            abs((a shr 8 and 255)-(b shr 8 and 255)) + abs((a and 255)-(b and 255))
+
+        private fun within(image: SubjectPixels, seed: Uv, box: FaceBox, segment: SegmentAt): ForegroundMask? {
+            val padX = 0.15*(box.right-box.left)
+            val padY = 0.12*(box.bottom-box.top)
+            val left = ((box.left-padX)*image.width).toInt().coerceIn(0,image.width)
+            val top = ((box.top-padY)*image.height).toInt().coerceIn(0,image.height)
+            val right = kotlin.math.ceil((box.right+padX)*image.width).toInt().coerceIn(0,image.width)
+            val bottom = kotlin.math.ceil((box.bottom+padY)*image.height).toInt().coerceIn(0,image.height)
+            if (right-left < 5 || bottom-top < 5) return null
+            val prompt = Uv((seed.x*image.width-left)/(right-left), (seed.y*image.height-top)/(bottom-top))
+            if (prompt.x !in 0.0..<1.0 || prompt.y !in 0.0..<1.0) return null
+            val local = segment(image.crop(left,top,right-left,bottom-top), prompt) ?: return null
+            return local.inImage(image.width,image.height,left,top,seed)
+        }
+
+        fun from(source: Observation, selected: SelectedSubject, image: SubjectPixels, segment: SegmentAt): SubjectOutline? {
+            val box = selected.bounds
+            val center = Uv((box.left+box.right)/2, (box.top+box.bottom)/2)
+            val candidates = mutableListOf<Uv>()
+            for (row in 0 until 9) for (col in 0 until 7) {
+                val p = Uv(box.left+(col+0.5)*(box.right-box.left)/7, box.top+(row+0.5)*(box.bottom-box.top)/9)
+                if (selected.contains(p)) candidates.add(p)
             }
-            if (attempted < 8 || anchors.count { it.inner != it.outer } < attempted * 0.50) return null
-            return SubjectOutline(source, anchors)
+            val seed = candidates.minByOrNull { it.distance(center) } ?: return null
+            val mask = within(image, seed, box, segment)?.constrained(selected.outline,seed) ?: return null
+            // A partially occluded instance may still have a traceable visible component.
+            // Full-subject eligibility is checked separately against the extent of the selection.
+            if (candidates.count(mask::contains) < candidates.size*0.30) return null
+            val b = mask.bounds
+            val overlap = (minOf(b.right,box.right)-maxOf(b.left,box.left)).coerceAtLeast(0.0) *
+                (minOf(b.bottom,box.bottom)-maxOf(b.top,box.top)).coerceAtLeast(0.0)
+            if (overlap < (b.right-b.left)*(b.bottom-b.top)*0.50) return null
+            val samples = mutableListOf<Sample>()
+            for (row in 0 until 9) for (col in 0 until 7) {
+                val p = Uv(b.left+(col+0.5)*(b.right-b.left)/7, b.top+(row+0.5)*(b.bottom-b.top)/9)
+                if (mask.contains(p)) image.at(p.x,p.y)?.let { samples.add(Sample(p,it)) }
+            }
+            val complete = b.right-b.left >= 0.78*(box.right-box.left) && b.bottom-b.top >= 0.78*(box.bottom-box.top) &&
+                b.left > 0 && b.top > 0 && b.right < 1 && b.bottom < 1
+            return if (samples.size >= 6) SubjectOutline(source, seed, mask, selected.outline, complete, samples, segment) else null
         }
     }
 }
