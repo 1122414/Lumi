@@ -21,6 +21,7 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ZoomState
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -28,6 +29,7 @@ import androidx.core.content.edit
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.Observer
 import com.lumi.camera.BuildConfig
 import com.lumi.camera.guidance.Guide
 import com.lumi.camera.guidance.GuideEvidence
@@ -56,7 +58,24 @@ internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: 
     val outline: List<Point?> = emptyList(), val evidence: GuideEvidence = GuideEvidence.NO_OBSERVATION)
 
 internal data class ViewfinderZoom(val ratio: Float = 1f, val min: Float = 1f, val max: Float = 1f,
-    val changing: Boolean = false)
+    val changing: Boolean = false) {
+    fun shortcuts(): List<Float> {
+        if (min == max) return listOf(min)
+        val stops = sortedSetOf(min, max)
+        fun addBetween(value: Float) {
+            if (value > min + 0.005f && value < max - 0.005f) stops.add(value)
+        }
+        addBetween(3f)
+        var decade = 1.0
+        while (decade < max) {
+            addBetween(decade.toFloat())
+            addBetween((2 * decade).toFloat())
+            addBetween((5 * decade).toFloat())
+            decade *= 10
+        }
+        return stops.toList()
+    }
+}
 
 internal class CameraSession(
     private val view: PreviewView,
@@ -144,6 +163,7 @@ internal class CameraSession(
     private var uses = emptyArray<UseCase>()
     private var capture: ImageCapture? = null
     private var camera: Camera? = null
+    private var zoomObserver: Observer<ZoomState>? = null
     private val readings = FocalReadings()
     private var zoom = ViewfinderZoom()
     private var appliedZoom = 1f
@@ -212,10 +232,7 @@ internal class CameraSession(
         try {
             val camera = p.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
             this.camera = camera
-            val range = camera.cameraInfo.zoomState.value
-            zoom = ViewfinderZoom(1f, range?.minZoomRatio ?: 1f, range?.maxZoomRatio ?: 1f)
             appliedZoom = 1f
-            onZoom(zoom)
             val sensors = CameraPose(context, rotation)
             poses = sensors
             if (!sensors.start()) onMessage("此设备的旋转矢量传感器不可用。")
@@ -229,7 +246,15 @@ internal class CameraSession(
             analysis.setAnalyzer(worker, analyzer)
             binding = next
             capture = photo
-            setZoom(desiredZoom)
+            val ranges = Observer<ZoomState> { range ->
+                if (this.camera === camera && (zoom.min != range.minZoomRatio || zoom.max != range.maxZoomRatio)) {
+                    zoom = zoom.copy(min = range.minZoomRatio, max = range.maxZoomRatio)
+                    onZoom(zoom)
+                    setZoom(desiredZoom)
+                }
+            }
+            zoomObserver = ranges
+            camera.cameraInfo.zoomState.observe(owner, ranges)
             onBound(true)
         } catch (e: RuntimeException) {
             Log.e("LumiCamera", "Unable to bind rear camera", e)
@@ -537,6 +562,8 @@ internal class CameraSession(
     }
 
     private fun releaseBinding() {
+        zoomObserver?.let { camera?.cameraInfo?.zoomState?.removeObserver(it) }
+        zoomObserver = null
         zoomGeneration++
         zoomSinceNs = 0L
         logZoomFrame = true

@@ -11,6 +11,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -212,15 +214,29 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
 
 @Composable
 private fun ZoomControls(zoom: ViewfinderZoom, select: (Float) -> Unit) {
-    val stops = remember(zoom.min, zoom.max) {
-        (listOf(zoom.min, 1f, 2f, 3f).filter { it in zoom.min..zoom.max } +
-            listOfNotNull(zoom.max.takeIf { it < 2f })).distinct().sorted()
-    }
-    fun label(value: Float) = String.format(java.util.Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.') + "×"
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        for (stop in stops) {
-            FilterChip(selected = abs(stop - zoom.ratio) < 0.005f, onClick = { select(stop) }, label = { Text(label(stop)) })
+    val stops = remember(zoom.min, zoom.max) { zoom.shortcuts() }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically) {
+        ZoomChip(stops.first(), zoom.ratio, select)
+        if (stops.size > 2) {
+            Row(Modifier.weight(1f, fill = false).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (index in 1 until stops.lastIndex) ZoomChip(stops[index], zoom.ratio, select)
+            }
         }
-        if (stops.none { abs(it - zoom.ratio) < 0.005f }) Text(label(zoom.ratio), color = Color.White, fontSize = 14.sp)
+        ZoomChip(stops.last(), zoom.ratio, select)
+        if (stops.none { abs(it - zoom.ratio) < 0.005f }) {
+            Text(zoomLabel(zoom.ratio), color = Color.White, fontSize = 14.sp)
+        }
     }
 }
+
+@Composable
+private fun ZoomChip(stop: Float, current: Float, select: (Float) -> Unit) {
+    FilterChip(selected = abs(stop - current) < 0.005f, onClick = { select(stop) },
+        label = { Text(zoomLabel(stop), maxLines = 1) })
+}
+
+private fun zoomLabel(value: Float) =
+    String.format(java.util.Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.') + "×"

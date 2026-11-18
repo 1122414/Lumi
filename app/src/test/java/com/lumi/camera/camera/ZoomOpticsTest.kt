@@ -8,6 +8,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ZoomOpticsTest {
+    @Test fun shortcutsIncludeTheReportedLimitsAndOnlyAvailableIntermediateRatios() {
+        assertEquals(listOf(1f, 2f, 3f, 5f, 10f, 20f), ViewfinderZoom(min = 1f, max = 20f).shortcuts())
+        assertEquals(listOf(0.6f, 1f, 2f, 3f, 5f, 7.5f), ViewfinderZoom(min = 0.6f, max = 7.5f).shortcuts())
+        assertEquals(listOf(1f, 2f, 2.4f), ViewfinderZoom(max = 2.4f).shortcuts())
+        assertEquals(listOf(1f), ViewfinderZoom().shortcuts())
+        val high = ViewfinderZoom(min = 0.5f, max = 120f).shortcuts()
+        assertEquals(listOf(0.5f, 1f, 2f, 3f, 5f, 10f, 20f, 50f, 100f, 120f), high)
+    }
+
     @Test fun effectiveFocalUsesTheAppliedFieldOfViewAndRejectsTransitionFrames() {
         for (ratio in listOf(0.6f, 1f, 2f, 3.25f)) {
             assertEquals(5f*ratio, zoomedFocal(5f, ratio, ratio)!!, 0.0001f)
