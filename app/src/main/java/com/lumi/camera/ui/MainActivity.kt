@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.camera.view.PreviewView
+import com.lumi.camera.BuildConfig
 import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.Viewfinder
@@ -147,8 +148,19 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
         Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Lumi", color = Color.White)
-            TextButton(session::rememberComposition, enabled = bound && frame.canRemember) {
-                Text("记住这个构图", fontSize = 12.sp)
+            if (BuildConfig.DEBUG) Box {
+                var debugMenuOpen by remember { mutableStateOf(false) }
+                TextButton(onClick = { debugMenuOpen = true }) { Text("调试", fontSize = 12.sp) }
+                DropdownMenu(expanded = debugMenuOpen, onDismissRequest = { debugMenuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("记住这个构图") },
+                        enabled = bound && frame.canRemember,
+                        onClick = {
+                            debugMenuOpen = false
+                            session.rememberComposition()
+                        }
+                    )
+                }
             }
         }
         Column(Modifier.align(Alignment.BottomCenter), horizontalAlignment = Alignment.CenterHorizontally) {
