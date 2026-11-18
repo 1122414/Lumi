@@ -47,7 +47,7 @@ import java.util.concurrent.Executors
 
 internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: Boolean = false,
     val ring: Point? = null, val ready: Boolean = false, val merged: Boolean = false, val reason: String? = null,
-    val outline: List<Point?> = emptyList(), val returning: Boolean = false)
+    val outline: List<Point?> = emptyList(), val evidence: GuideEvidence = GuideEvidence.NO_OBSERVATION)
 
 internal class CameraSession(
     private val view: PreviewView,
@@ -260,7 +260,9 @@ internal class CameraSession(
         val visual = if (fresh != null && active != null) active.visual else Guide(null, evidence = GuideEvidence.STALE)
         val pose = poses?.latestAt(now)
         val seen = fresh?.outline?.takeIf { fresh.follower === identified?.outline }
-        val guide = active?.direction?.display(visual, current, pose, seen != null) ?: Guide(null)
+        val guide = active?.let {
+            it.direction.display(visual, fresh?.let(it.target::current), pose, seen != null)
+        } ?: Guide(null)
         if (active != null && guide.evidence == GuideEvidence.RETURN_DIRECTION && (visual.ready || visual.merged)) {
             active.visual = active.guidance.lost()
         }
@@ -276,7 +278,7 @@ internal class CameraSession(
         }
         active?.trace(guide, outline.any { it != null }, now)
         onFrame(Viewfinder(current?.subject != null, active != null, guide.ring?.let(::preview), guide.ready,
-            guide.merged, active?.reason ?: identified?.name, outline, guide.evidence == GuideEvidence.RETURN_DIRECTION))
+            guide.merged, active?.reason ?: identified?.name, outline, guide.evidence))
     }
 
     private fun startGuide(target: RememberedComposition, reason: String? = null) {

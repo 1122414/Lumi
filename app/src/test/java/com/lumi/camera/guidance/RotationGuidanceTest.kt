@@ -79,6 +79,31 @@ class RotationGuidanceTest {
         assertTrue(guidance.feed(sample(1300)).ready)
     }
 
+    @Test fun aPendingCompositionShowsTheOriginalBearingOnlyForTheFreshlyMatchedInstance() {
+        val targetPose = right(8.0) * pitch(3.0)
+        val goal = target.copy(pose = targetPose)
+        val direction = ReturnDirection(goal, target,
+            listOf(Uv(0.3,0.2), Uv(0.7,0.2), Uv(0.7,0.8), Uv(0.3,0.8)))
+        val current = sample(100)
+        val mismatch = Guide(null, evidence = GuideEvidence.MISMATCH)
+        val backgroundGap = Guide(Uv.CENTER, evidence = GuideEvidence.BACKGROUND_UNCERTAIN, merged = true)
+        for (unconfirmed in listOf(mismatch, backgroundGap)) {
+            for (pose in listOf(origin, right(12.0), targetPose)) {
+                val projected = RotationProjection(goal, current.copy(pose = pose)).project(Uv.CENTER)!!
+                val shown = direction.display(unconfirmed, current, pose, subjectVisible = true)
+                assertEquals(GuideEvidence.VERIFYING_COMPOSITION, shown.evidence)
+                assertTrue(projected.distance(shown.ring!!) < 1e-6)
+                assertFalse(shown.ready)
+                assertFalse(shown.merged)
+            }
+        }
+        assertNull(direction.display(mismatch, current, origin, subjectVisible = false).ring)
+        assertNull(direction.display(mismatch, current.copy(subject = face.copy(id = 8)), origin, true).ring)
+        assertNull(direction.display(mismatch, current.copy(subject = null), origin, true).ring)
+        assertNull(direction.display(Guide(null, evidence = GuideEvidence.STALE), current, origin, true).ring)
+        assertNull(direction.display(mismatch, null, origin, true).ring)
+    }
+
     @Test fun aimingRightMovesRingLeftAndAimingUpMovesItDown() {
         val d = tan(Math.toRadians(12.0))
         for ((pose, expected) in listOf(right(12.0) to Uv(0.5 - lens.fx*d, 0.5),

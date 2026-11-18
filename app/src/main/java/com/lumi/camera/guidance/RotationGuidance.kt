@@ -61,7 +61,7 @@ internal class RotationProjection(target: Observation, current: Observation) {
     }
 }
 
-internal enum class GuideEvidence { CONFIRMED, PARTIAL_SUBJECT, BACKGROUND_UNCERTAIN, FACE_GAP, NO_FACE, OTHER_FACE, MISMATCH, NO_OBSERVATION, STALE, RETURN_DIRECTION }
+internal enum class GuideEvidence { CONFIRMED, PARTIAL_SUBJECT, BACKGROUND_UNCERTAIN, FACE_GAP, NO_FACE, OTHER_FACE, MISMATCH, NO_OBSERVATION, STALE, VERIFYING_COMPOSITION, RETURN_DIRECTION }
 
 internal data class Guide(val ring: Uv?, val ready: Boolean = false,
     val evidence: GuideEvidence = GuideEvidence.NO_OBSERVATION, val merged: Boolean = ready) {
@@ -78,6 +78,15 @@ internal class ReturnDirection(private val target: Observation, private val sour
         val goal = RotationProjection(target, live).onView(Uv.CENTER, previousEdge)
         val atEdge = maxOf(abs(goal.x - 0.5), abs(goal.y - 0.5)) >= 0.499999
         if (atEdge) previousEdge = goal
+        if (subjectVisible && subjectCorners.isNotEmpty()) {
+            // The saved aim is still a direction when the same instance is visible
+            // but its placement or background cannot yet confirm the composition.
+            val observedId = observed?.subject?.id
+            if (observedId != null && observedId == target.subject?.id &&
+                (visual.evidence == GuideEvidence.BACKGROUND_UNCERTAIN || visual.evidence == GuideEvidence.MISMATCH)) {
+                return Guide(goal, evidence = GuideEvidence.VERIFYING_COMPOSITION)
+            }
+        }
         if (subjectCorners.isNotEmpty() && visual.ring == null) {
             val projection = RotationProjection(source, live)
             val corners = subjectCorners.mapNotNull(projection::project)

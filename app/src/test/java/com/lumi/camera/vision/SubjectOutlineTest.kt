@@ -123,6 +123,45 @@ class SubjectOutlineTest {
         assertNull(target.current(frame.copy(follower = obsolete, outline = follower.observe(source,pixels)))!!.subject)
     }
 
+    @Test fun aTrackedToyKeepsItsRecommendedAimWhileTheBackgroundIsBeingChecked() {
+        val pixels = image()
+        val geometry = FrameGeometry(Extent(120,160), Crop(0,0,120,160), 0)
+        val wall = Background(IntArray(40*52) { 160 })
+        val changedWall = Background(IntArray(40*52) { 45 })
+        val frame = SceneFrame(1,0,geometry,source,null,wall,pixels)
+        val aim = Uv(0.58, 0.45)
+        val plan = Recommendation.validated(mapOf("aimPoint" to mapOf("x" to aim.x, "y" to aim.y),
+            "confidence" to 0.9, "alreadyGood" to false, "reason" to "玩偶耳边留白", "subject" to fields))!!
+        val follower = SubjectOutline.from(source, toy, pixels, segment)!!
+        val target = RememberedComposition.from(frame, plan, follower)!!
+        val guidance = RotationGuidance(target.observation, verifyScene = true)
+        val b = follower.bounds
+        val direction = ReturnDirection(target.observation, source, listOf(Uv(b.left,b.top),
+            Uv(b.right,b.top), Uv(b.right,b.bottom), Uv(b.left,b.bottom)))
+        for (i in 1..22) {
+            val atGoal = i >= 3
+            val pose = if (atGoal) target.observation.pose else source.pose
+            val capture = source.copy(timeNs = i*50_000_000L, pose = pose)
+            val seen = follower.observe(capture, image(pose = capture))
+            assertTrue("blue contour at frame $i", seen?.points?.any { it != null } == true)
+            val current = target.current(frame.copy(observation = capture, follower = follower, outline = seen))!!
+            val background = if (i <= 12) changedWall else wall
+            val agrees = background.agrees(target.marks, RotationProjection(source, current))
+            val visual = guidance.update(current, current.timeNs, agrees)
+            val shown = direction.display(visual, current, pose, subjectVisible = true)
+            val ring = requireNotNull(shown.ring) { "visible toy without a ring at frame $i" }
+            val expected = if (atGoal) Uv.CENTER else aim
+            assertEquals(expected.x, ring.x, 0.02)
+            assertEquals(expected.y, ring.y, 0.02)
+            if (i <= 12) {
+                assertFalse(agrees)
+                assertFalse(shown.trusted)
+                assertFalse(shown.merged)
+            }
+            assertEquals("fresh hold at frame $i", i >= 20, shown.ready)
+        }
+    }
+
     @Test fun visiblePartsOfTheSilhouetteCanGuideWithoutDeclaringTheWholeSubjectReady() {
         val pixels = image(visibleAbove = 0.50)
         val frame = SceneFrame(1,0,FrameGeometry(Extent(120,160), Crop(0,0,120,160), 0), source,

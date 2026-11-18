@@ -11,6 +11,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -33,6 +34,7 @@ import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.Viewfinder
 import com.lumi.camera.camera.Point
+import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.shotplan.VisionChat
 import kotlin.math.abs
 import kotlinx.coroutines.delay
@@ -121,8 +123,9 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
             settled = true
         }
     }
-    val alpha by animateFloatAsState(if (frame.ring != null && !settled) 1f else 0f,
-        tween(120), label = "ring visibility")
+    val showRing = frame.ring != null && !(frame.merged && settled)
+    val alpha by animateFloatAsState(if (showRing) 1f else 0f,
+        if (showRing) snap() else tween(120), label = "ring visibility")
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val controlsHeight = minOf(90.dp, maxHeight * 0.24f)
         Box(Modifier.fillMaxSize().padding(vertical = controlsHeight), contentAlignment = Alignment.Center) {
@@ -188,8 +191,8 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
                 frame.ready -> "可以拍"
                 !bound -> "正在打开后置相机"
                 recommendationStatus != null -> recommendationStatus.orEmpty()
-                frame.hasTarget && frame.ring == null -> "正在核对主体与背景"
-                frame.returning -> "返回原构图"
+                frame.hasTarget && (frame.ring == null || frame.evidence == GuideEvidence.VERIFYING_COMPOSITION) -> "正在核对主体与背景"
+                frame.evidence == GuideEvidence.RETURN_DIRECTION -> "返回原构图"
                 frame.hasTarget -> "构图引导中"
                 else -> "对准想拍的人或物"
             }, color = Color.White, fontSize = 14.sp)

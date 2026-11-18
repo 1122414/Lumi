@@ -2,7 +2,7 @@
 
 后置 1×、竖屏，对准想拍的人或物件后点「推荐构图」。每次只向配置的视觉模型发送当时的一张取景图。模型选定一个主体、它与背景的构图和一个取景中心。快门上方显示十字以内的理由。
 
-蓝色虚线标出手机在当前画面中确认的主体外缘。跟着绿环原地转动或仰俯手机。主体本应在画面内却无法确认，或背景持续不符时，绿环暂停，页面显示「正在核对主体与背景」。手机明显转开且原主体已在画面外时，边缘绿环给出返回方向。重新认出主体后继续同一条推荐。主体完整、背景相符，回到推荐构图并停稳时会提示「可以拍」，由你按快门。
+蓝色虚线标出手机在当前画面中确认的主体外缘。跟着绿环原地转动或仰俯手机。当手机认出同一主体，但背景或主体位置还在核对时，绿环继续指向原推荐构图，页面显示「正在核对主体与背景」。主体本应在画面内却无法确认时，引导暂停。手机明显转开且原主体已在画面外时，边缘绿环给出返回方向。主体完整、背景相符，回到推荐构图并停稳时会提示「可以拍」，由你按快门。
 
 前景分割在手机上运行，使用 MediaPipe Tasks Vision 0.10.35 和随应用打包的 Google Magic Touch v1 模型。模型大小 6,227,884 字节，SHA-256 为 `e24338a717c1b7ad8d159666677ef400babb7f33b8ad60c4d96db4ecf694cd25`。[模型来源](https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite) · [Google 模型卡](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MagicTouch.pdf) · [Apache 2.0 许可](app/src/main/assets/magic_touch.LICENSE.txt)
 
