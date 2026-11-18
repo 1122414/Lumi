@@ -71,6 +71,36 @@ class SubjectOutlineTest {
         assertNull(SubjectOutline.from(source, toy, SubjectPixels(120,160,IntArray(120*160)), segment))
     }
 
+    @Test fun aCoarseSelectionDoesNotMoveColourSamplesOnAStationaryTexturedToy() {
+        val coarseOutline = listOf(listOf(160,210), listOf(500,210), listOf(540,280),
+            listOf(540,730), listOf(160,730), listOf(120,670))
+        val selection = SelectedSubject.parse(fields + ("outline" to coarseOutline))!!
+        val w = 120
+        val h = 160
+        val wall = 0x668477
+        val pixels = SubjectPixels(w,h,IntArray(w*h) { i ->
+            val x = i % w
+            val y = i / w
+            if (x !in 20..61 || y !in 40..111) wall else {
+                val level = (x*31 + y*47) % 164 + 48
+                (level shl 16) or ((255-level) shl 8) or level
+            }
+        })
+        val foreground: SegmentAt = { image, seed ->
+            val mask = ByteArray(image.width*image.height) { j ->
+                val x = (j % image.width + 0.5) / image.width
+                val y = (j / image.width + 0.5) / image.height
+                if (image.at(x, y) == wall) -1 else 0
+            }
+            ForegroundMask.at(image.width,image.height,mask,seed)
+        }
+        val outline = SubjectOutline.from(source, selection, pixels, foreground)!!
+        repeat(8) { index ->
+            val now = source.copy(timeNs = (index + 1) * 70_000_000L)
+            assertEquals("same toy at frame $index", true, outline.observe(now, pixels)?.complete)
+        }
+    }
+
     @Test fun nonHumanRecommendationCanReachReadyWithoutAnyFaceAndRejectsAnotherTargetsOutline() {
         val plan = Recommendation.validated(mapOf("aimPoint" to mapOf("x" to 0.5, "y" to 0.5),
             "confidence" to 0.9, "alreadyGood" to true, "reason" to "兔子玩偶耳边留白", "subject" to fields))!!

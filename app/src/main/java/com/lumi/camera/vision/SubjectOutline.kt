@@ -16,7 +16,7 @@ internal typealias SegmentAt = (SubjectPixels, Uv) -> ForegroundMask?
 // The source appearance is immutable. Matching locates a prompt inside the same instance;
 // it never supplies vertices for drawing. All blue pixels come from the current mask.
 internal class SubjectOutline private constructor(private val source: Observation, private val seed: Uv,
-    private val original: ForegroundMask, private val selection: List<Uv>, private val referenceComplete: Boolean, private val samples: List<Sample>, private val segment: SegmentAt) {
+    private val original: ForegroundMask, private val sourceRegion: FaceBox, private val selection: List<Uv>, private val referenceComplete: Boolean, private val samples: List<Sample>, private val segment: SegmentAt) {
     private data class Sample(val p: Uv, val color: Int)
     val bounds get() = original.bounds
     val sourceSubject = position(original)
@@ -70,32 +70,33 @@ internal class SubjectOutline private constructor(private val source: Observatio
         if (distinctive && bestCost > 19) locate(10,0.042,listOf(0.75,0.9,1.0,1.2))
         if (!bestCost.isFinite()) return null
         fun shifted(p: Uv) = Uv(at.x+(p.x-predicted.x)*scale, at.y+(p.y-predicted.y)*scale)
-        val projectedSelection = selection.mapNotNull {
-            projection.project(Uv(it.x+base.x-seed.x,it.y+base.y-seed.y))?.let(::shifted)
-        }
+        fun project(p: Uv) = projection.project(Uv(p.x+base.x-seed.x,p.y+base.y-seed.y))?.let(::shifted)
+        val projectedSelection = selection.mapNotNull(::project)
         if (projectedSelection.size != selection.size) return null
         val box = FaceBox(projectedSelection.minOf { it.x },projectedSelection.minOf { it.y },
             projectedSelection.maxOf { it.x },projectedSelection.maxOf { it.y })
         val raw = within(image, at, box, segment) ?: return null
-        // Register the prior to the measured component as a whole. A prompt is an interior
-        // point, not a measurement of the position or scale of the outline.
-        fun align(v: Double, lo: Double, hi: Double, foundLo: Double, foundHi: Double): Double {
+        // Register measured edges to the same edges at selection time. The coarse model
+        // polygon can extend beyond the actual toy even on a completely stationary frame.
+        val expected = listOf(Uv(sourceRegion.left,sourceRegion.top),Uv(sourceRegion.right,sourceRegion.top),
+            Uv(sourceRegion.right,sourceRegion.bottom),Uv(sourceRegion.left,sourceRegion.bottom)).map { project(it) ?: return null }
+        val expectedBox = FaceBox(expected.minOf { it.x },expected.minOf { it.y },expected.maxOf { it.x },expected.maxOf { it.y })
+        fun align(v: Double, lo: Double, hi: Double, measuredLo: Double, measuredHi: Double): Double {
             val width = hi-lo
             if (width <= 0) return v
-            val tolerance = width * 0.18
-            val a = if (foundLo > 0 && abs(foundLo-lo) <= tolerance) foundLo else lo
-            val b = if (foundHi < 1 && abs(foundHi-hi) <= tolerance) foundHi else hi
-            return a + (v-lo)*(b-a)/width
+            val start = if (measuredLo > 0 && abs(measuredLo-lo) <= width*0.18) measuredLo else lo
+            val end = if (measuredHi < 1 && abs(measuredHi-hi) <= width*0.18) measuredHi else hi
+            return start + (v-lo)*(end-start)/width
         }
-        fun aligned(p: Uv) = Uv(align(p.x,box.left,box.right,raw.bounds.left,raw.bounds.right),
-            align(p.y,box.top,box.bottom,raw.bounds.top,raw.bounds.bottom))
+        fun aligned(p: Uv) = Uv(align(p.x,expectedBox.left,expectedBox.right,raw.bounds.left,raw.bounds.right),
+            align(p.y,expectedBox.top,expectedBox.bottom,raw.bounds.top,raw.bounds.bottom))
         val mask = raw.constrained(projectedSelection.map(::aligned),at) ?: return null
         val b = mask.bounds
         val clipped = b.left == 0.0 || b.top == 0.0 || b.right == 1.0 || b.bottom == 1.0
         var visible = 0
         var confirmed = 0
         for (sample in projected) {
-            val p = aligned(shifted(sample.p))
+            val p = shifted(sample.p)
             val color = image.at(p.x,p.y) ?: continue
             visible++
             if (mask.contains(p) && colorError(color,sample.color) <= 50.0) confirmed++
@@ -117,12 +118,9 @@ internal class SubjectOutline private constructor(private val source: Observatio
         if (fraction/reference !in 0.20..1.85) return null
         val subject = position(mask)
         val entire = referenceComplete && !clipped && fraction/reference in 0.7..1.45 && confirmed >= samples.size*0.68
-        // Use the measured mask centre to correct gradual drift only when it is wholly visible.
-        val corrected = if (entire) {
-            val center = projection.project(Uv(sourceSubject.center.x+base.x-seed.x, sourceSubject.center.y+base.y-seed.y))
-            if (center == null) at else Uv(at.x + subject.center.x-shifted(center).x, at.y + subject.center.y-shifted(center).y)
-        } else at
-        lastSeed = RotationProjection(current,source).project(corrected) ?: base
+        // When interior colours cannot distinguish nearby positions, use the verified extent.
+        val next = if (entire && !distinctive) aligned(at) else at
+        lastSeed = RotationProjection(current,source).project(next) ?: base
         lastScale = scale
         lastTime = current.timeNs
         return SeenOutline(mask, subject, entire)
@@ -185,7 +183,8 @@ internal class SubjectOutline private constructor(private val source: Observatio
                 if (selected.contains(p)) candidates.add(p)
             }
             val seed = candidates.minByOrNull { it.distance(center) } ?: return null
-            val mask = within(image, seed, box, segment)?.constrained(selected.outline,seed) ?: return null
+            val region = within(image, seed, box, segment) ?: return null
+            val mask = region.constrained(selected.outline,seed) ?: return null
             // A partially occluded instance may still have a traceable visible component.
             // Full-subject eligibility is checked separately against the extent of the selection.
             if (candidates.count(mask::contains) < candidates.size*0.30) return null
@@ -200,7 +199,7 @@ internal class SubjectOutline private constructor(private val source: Observatio
             }
             val complete = b.right-b.left >= 0.78*(box.right-box.left) && b.bottom-b.top >= 0.78*(box.bottom-box.top) &&
                 b.left > 0 && b.top > 0 && b.right < 1 && b.bottom < 1
-            return if (samples.size >= 6) SubjectOutline(source, seed, mask, selected.outline, complete, samples, segment) else null
+            return if (samples.size >= 6) SubjectOutline(source, seed, mask, region.bounds, selected.outline, complete, samples, segment) else null
         }
     }
 }

@@ -84,6 +84,30 @@ internal class CameraSession(
         private var lastReady = false
         private var lastOutline = false
         private var lastLogNs = 0L
+        private var windowStartNs = 0L
+        private var frames = 0
+        private var late = 0
+        private var noObservation = 0
+        private var unmatched = 0
+
+        fun traceFrame(frame: SceneFrame, ageNs: Long, nowNs: Long) {
+            if (!BuildConfig.DEBUG || target.outline == null ||
+                (frame.observation != null && frame.follower !== target.outline)) return
+            if (frames == 0) windowStartNs = nowNs
+            frames++
+            when {
+                ageNs !in 0..RotationGuidance.FRESH_NS -> late++
+                frame.observation == null -> noObservation++
+                frame.outline == null -> unmatched++
+            }
+            if (nowNs - windowStartNs < 2_000_000_000L) return
+            val matched = frames-late-noObservation-unmatched
+            Log.d("LumiGuidance", "frames=$frames late=$late noObservation=$noObservation unmatched=$unmatched matched=$matched")
+            frames = 0
+            late = 0
+            noObservation = 0
+            unmatched = 0
+        }
 
         fun trace(guide: Guide, outlined: Boolean, nowNs: Long) {
             if (!BuildConfig.DEBUG || (guide.evidence == lastEvidence && guide.ready == lastReady && outlined == lastOutline) ||
@@ -203,6 +227,7 @@ internal class CameraSession(
             onRecommendationStatus(null)
             observer?.selected = null
         }
+        run?.traceFrame(frame, age, now)
         if (age !in 0..RotationGuidance.FRESH_NS) {
             expire.run()
             return
