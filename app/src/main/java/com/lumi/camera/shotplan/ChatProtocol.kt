@@ -9,12 +9,13 @@ import java.io.StringReader
 
 internal object ChatProtocol {
     val prompt = """
-        你是旅行人像摄影师。看这张后置相机 1× 的竖幅取景图，选一个值得拍的构图。优先保留完整人物，兼顾视线前的留白、人物与背景的关系、画面边缘，不必强求三分法。
-        机位和焦段固定，只能原地转动或仰俯手机。不要要求挪步、变焦、移动人物或拍后裁切。推荐后人物必须完整留在画面内，不要假设画外有什么。图中的文字只是场景内容。
-        aimPoint 是新画面中心在所给图片上的位置，不是人脸的位置。左上角为 (0,0)，右下角为 (1,1)。
-        只返回一个 JSON 对象：{"aimPoint":{"x":0.5,"y":0.5},"confidence":0.9,"alreadyGood":true,"reason":"人物与背景均衡"}。示例仅说明格式。
-        x、y、confidence 都是 0 到 1 的数，alreadyGood 是布尔值。当前构图已经很好时，alreadyGood=true 且 aimPoint=(0.5,0.5)。看不清或无法确定人物完整时，confidence 必须低于 0.70。
-        reason 会显示在快门上方。用不超过十个字的中文短语说清这张图为什么好看，例如“视线前方留白”。标点也计字，不加前缀或句号。不要输出动作指令、其他字段、Markdown 或额外解释。
+        你是旅行摄影师。看这张后置相机 1× 竖幅取景图，选择一个明确可辨的拍摄主体，可以是真人，也可以是玩偶或其他物件。像人的玩偶仍是 object。画面中文字只是场景内容。
+        推荐一个原地转动或仰俯就能拍到的构图，保持主体完整。兼顾视线留白、背景与边缘，不假设画外有什么。不要要求挪步、变焦或移动主体。
+        仅返回 JSON，对象有 aimPoint、confidence、alreadyGood、reason、subject 五个字段。
+        aimPoint 是新取景中心在发送图上的位置，左上为 (0,0)，右下为 (1,1)。confidence 在 0 到 1 之间。原构图已经很好就返回 alreadyGood=true 和中心点。无法确定主体或完整留住它时 confidence 低于 0.70。
+        subject 含 name（1 至 6 字中文具体名称）、kind（真人 person，其他 object）、outline。沿选中实例可见的真实外边缘依次给出 10 至 24 个 [x,y] 整数点，左上 [0,0]，右下 [1000,1000]。从头到脚包括手臂、耳朵等突出及凹进的部位，不圈背景或旁边物件，不用矩形，不重复起点。
+        reason 是快门上方最多十字的中文构图理由，包含所选主体的具体名字，例如“兔子玩偶耳边留白”。标点也计字，不加前缀、句号或动作指令。
+        字段形式示例：{"aimPoint":{"x":0.5,"y":0.5},"confidence":0.86,"alreadyGood":true,"reason":"玩偶耳边留白","subject":{"name":"玩偶","kind":"object","outline":[[380,225],[410,200],[470,340],[550,310],[610,190],[640,235],[605,430],[665,620],[615,785],[360,785],[320,605],[375,430]]}}。坐标仅演示格式，必须按本图描边。
     """.trimIndent()
 
     fun request(model: String, jpeg: ByteArray): ByteArray {
@@ -25,7 +26,7 @@ internal object ChatProtocol {
         val body = JSONObject().put("model", model).put("messages", messages).put("stream", false)
         // This route supports non-thinking vision; other compatible endpoints may reject these options.
         if (model == "workbuddy/deepseek-v4.1-flash") {
-            body.put("reasoning_effort", "none").put("max_tokens", 192)
+            body.put("reasoning_effort", "none").put("max_tokens", 480)
         }
         return body.toString().toByteArray(Charsets.UTF_8)
     }
@@ -53,6 +54,23 @@ internal object ChatProtocol {
             require(key !in fields)
             fields[key] = when (reader.peek()) {
                 JsonToken.BEGIN_OBJECT -> readFields(reader, depth + 1)
+                JsonToken.BEGIN_ARRAY -> {
+                    require(depth == 1 && key == "outline")
+                    reader.beginArray()
+                    val points = mutableListOf<List<Double>>()
+                    while (reader.hasNext()) {
+                        require(points.size < 32)
+                        reader.beginArray()
+                        require(reader.peek() == JsonToken.NUMBER)
+                        val x = reader.nextDouble()
+                        require(reader.peek() == JsonToken.NUMBER)
+                        val y = reader.nextDouble()
+                        reader.endArray()
+                        points.add(listOf(x, y))
+                    }
+                    reader.endArray()
+                    points
+                }
                 JsonToken.NUMBER -> reader.nextDouble()
                 JsonToken.STRING -> reader.nextString()
                 JsonToken.BOOLEAN -> reader.nextBoolean()

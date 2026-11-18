@@ -29,6 +29,7 @@ import androidx.lifecycle.LifecycleOwner
 import com.lumi.camera.BuildConfig
 import com.lumi.camera.guidance.Guide
 import com.lumi.camera.guidance.GuideEvidence
+import com.lumi.camera.guidance.Uv
 import com.lumi.camera.guidance.ReturnDirection
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
@@ -44,7 +45,8 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
 
 internal data class Viewfinder(val canRemember: Boolean = false, val hasTarget: Boolean = false,
-    val ring: Point? = null, val ready: Boolean = false, val merged: Boolean = false, val reason: String? = null)
+    val ring: Point? = null, val ready: Boolean = false, val merged: Boolean = false, val reason: String? = null,
+    val outline: List<Point?> = emptyList())
 
 internal class CameraSession(
     private val view: PreviewView,
@@ -77,15 +79,17 @@ internal class CameraSession(
         var visual = Guide(null)
         private var lastEvidence: GuideEvidence? = null
         private var lastReady = false
+        private var lastOutline = false
         private var lastLogNs = 0L
 
-        fun trace(guide: Guide, nowNs: Long) {
-            if (!BuildConfig.DEBUG || (guide.evidence == lastEvidence && guide.ready == lastReady) ||
+        fun trace(guide: Guide, outlined: Boolean, nowNs: Long) {
+            if (!BuildConfig.DEBUG || (guide.evidence == lastEvidence && guide.ready == lastReady && outlined == lastOutline) ||
                 nowNs - lastLogNs < 500_000_000L) return
             lastEvidence = guide.evidence
+            lastOutline = outlined
             lastReady = guide.ready
             lastLogNs = nowNs
-            Log.d("LumiGuidance", "evidence=${guide.evidence} ring=${guide.ring != null} ready=${guide.ready}")
+            Log.d("LumiGuidance", "evidence=${guide.evidence} ring=${guide.ring != null} ready=${guide.ready} outline=$outlined")
         }
     }
     private var run: Run? = null
@@ -188,15 +192,18 @@ internal class CameraSession(
             cancelRecommendation()
             onRecommendationStatus("取景尺寸已变化，请重新推荐。")
         }
-        if (run?.target?.geometry?.let { it != frame.geometry } == true) run = null
+        if (run?.target?.geometry?.let { it != frame.geometry } == true) {
+            run = null
+            observer?.selected = null
+        }
         if (age !in 0..RotationGuidance.FRESH_NS) {
             expire.run()
             return
         }
         latest = frame
-        val current = frame.observation
         val t = run
         if (t != null) {
+            val current = t.target.current(frame)
             t.visual = if (current == null) t.guidance.lost() else {
                 val agrees = frame.background?.agrees(t.target.marks, RotationProjection(t.target.backgroundSource, current)) == true
                 t.guidance.update(current, now, agrees)
@@ -213,25 +220,34 @@ internal class CameraSession(
         val current = fresh?.observation
         val active = run
         if (active == null) {
-            onFrame(Viewfinder(canRemember = current?.face != null))
+            onFrame(Viewfinder(canRemember = current?.subject != null))
             return
         }
         val visual = if (fresh != null) active.visual else Guide(null, evidence = GuideEvidence.STALE)
-        val guide = active.direction.display(visual, current, poses?.latestAt(now))
+        val pose = poses?.latestAt(now)
+        val guide = active.direction.display(visual, current, pose)
         if (guide.evidence == GuideEvidence.RETURN_DIRECTION && (visual.ready || visual.merged)) {
             active.visual = active.guidance.lost()
         }
-        active.trace(guide, now)
         val geometry = active.target.geometry
-        val ring = guide.ring?.let {
-            val ref = geometry.referenceSize
-            FrameMapping(geometry, size).referenceToPreview(
-                Point((it.x * ref.width).toFloat(), (it.y * ref.height).toFloat()))
+        val ref = geometry.referenceSize
+        val mapping = FrameMapping(geometry, size)
+        fun preview(p: Uv) = mapping.referenceToPreview(Point((p.x * ref.width).toFloat(), (p.y * ref.height).toFloat()))
+        val seen = fresh?.outline?.takeIf { fresh.follower === active.target.outline }
+        val outline = if (seen == null || current == null) emptyList() else {
+            val projection = pose?.let { RotationProjection(current, current.copy(pose = it)) }
+            seen.points.map { point ->
+                val p = if (projection != null && point != null) projection.project(point) else point
+                p?.let(::preview)
+            }
         }
-        onFrame(Viewfinder(current?.face != null, true, ring, guide.ready, guide.merged, active.reason))
+        active.trace(guide, outline.any { it != null }, now)
+        onFrame(Viewfinder(current?.subject != null, true, guide.ring?.let(::preview), guide.ready,
+            guide.merged, active.reason, outline))
     }
 
     private fun startGuide(target: RememberedComposition, reason: String? = null) {
+        observer?.selected = target.outline
         run = Run(target, reason)
         view.removeCallbacks(drawDirection)
         view.postOnAnimation(drawDirection)
@@ -262,12 +278,13 @@ internal class CameraSession(
         val now = SystemClock.elapsedRealtimeNanos()
         cancelRecommendation()
         run = null
-        onFrame(Viewfinder(canRemember = latest?.observation?.face != null))
+        observer?.selected = null
+        onFrame(Viewfinder(canRemember = latest?.observation?.subject != null))
         val sample = observer?.takeModelFrame()
         if (sample == null || now - sample.scene.capturedNs !in 0..RotationGuidance.FRESH_NS ||
             latest?.geometry != sample.scene.geometry) {
             sample?.close()
-            onRecommendationStatus("没有新鲜的单人画面，请重新推荐。")
+            onRecommendationStatus("取景尚未就绪，请稍后重新推荐。")
             return
         }
         val source = sample.scene
@@ -313,7 +330,7 @@ internal class CameraSession(
             "confidence=${plan.confidence} alreadyGood=${plan.alreadyGood} reason=" + VisionChat.logReason(plan.reason))
         val target = RememberedComposition.from(source, plan)
         if (target == null) {
-            onRecommendationStatus("推荐构图无法完整保留人脸，请重新推荐。")
+            onRecommendationStatus("无法确认${plan.subject.name}的完整轮廓，请重新推荐。")
             return
         }
         onRecommendationStatus(null)

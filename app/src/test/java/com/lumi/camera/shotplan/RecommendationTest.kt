@@ -10,11 +10,13 @@ import org.junit.Test
 
 class RecommendationTest {
     private val source = Observation(10L, Pose(1.0, 0.0, 0.0, 0.0), Lens(1.1, 0.9, 0.5, 0.5),
-        FacePosition(7, Uv(0.55, 0.48), 0.14))
+        SubjectPosition(7, Uv(0.55, 0.48), 0.14))
     private val box = FaceBox(0.48, 0.38, 0.62, 0.58)
+    private val selected = mapOf("name" to "玩偶", "kind" to "object", "outline" to listOf(
+        listOf(400,300),listOf(500,350),listOf(600,300),listOf(640,680),listOf(500,700),listOf(370,680)))
     private fun fields(x: Double = 0.5, y: Double = 0.5): Map<String, Any?> = mapOf(
         "aimPoint" to mapOf("x" to x, "y" to y), "confidence" to 0.82,
-        "alreadyGood" to (x == 0.5 && y == 0.5), "reason" to "保留人物视线前的空间")
+        "alreadyGood" to (x == 0.5 && y == 0.5), "reason" to "玩偶视线前留白", "subject" to selected)
     private fun checkPoint(expected: Uv, actual: Uv?) {
         assertNotNull(actual)
         assertEquals(expected.x, actual!!.x, 1e-7)
@@ -38,8 +40,8 @@ class RecommendationTest {
         val aimX = 0.5 + sent.lens.fx * tan(angle)
         val target = Recommendation.validated(fields(aimX, 0.5))!!.targetFrom(sent, box)!!
         val turned = sent.copy(timeNs = 5_000_000_000, pose = sent.pose * yaw(angle))
-        val face = sent.face!!
-        val actual = turned.copy(face = face.copy(center = RotationProjection(sent, turned).project(face.center)!!))
+        val face = sent.subject!!
+        val actual = turned.copy(subject = face.copy(center = RotationProjection(sent, turned).project(face.center)!!))
         val guidance = RotationGuidance(target)
         checkPoint(Uv.CENTER, guidance.update(actual, actual.timeNs, true).ring)
         var ready = false
@@ -59,8 +61,8 @@ class RecommendationTest {
             .targetFrom(source, box)!!
         for (angle in listOf(3.0, 12.0)) {
             val turned = source.copy(timeNs = 9_000_000_000L, pose = source.pose * yaw(angle))
-            val face = source.face!!
-            val current = turned.copy(face = face.copy(center = RotationProjection(source, turned).project(face.center)!!))
+            val face = source.subject!!
+            val current = turned.copy(subject = face.copy(center = RotationProjection(source, turned).project(face.center)!!))
             val guide = RotationGuidance(target).update(current, current.timeNs, true)
             checkPoint(Uv(0.5 + source.lens.fx * tan(Math.toRadians(8.0 - angle)), 0.5), guide.ring)
             assertFalse(guide.ready)
@@ -81,10 +83,11 @@ class RecommendationTest {
 
     @Test fun bottomCaptionKeepsShortReasonsAndFitsTenUnicodeCharacters() {
         fun caption(reason: String) = Recommendation.validated(fields() + ("reason" to reason))!!.caption
-        assertEquals("视线前方留白", caption("视线前方留白"))
-        assertEquals("人物突出", caption("人物突出，背景的线条更干净"))
-        assertEquals("视".repeat(9) + "𠮷", caption("视".repeat(9) + "𠮷"))
-        assertEquals("视".repeat(8) + "𠮷…", caption("视".repeat(8) + "𠮷留白"))
+        assertEquals("玩偶·视线前方留白", caption("视线前方留白"))
+        assertEquals("玩偶突出", caption("主体突出，背景的线条更干净"))
+        assertEquals("玩偶·窗边的光线衬…", caption("窗边的光线衬托出了玩偶的笑容"))
+        assertEquals("玩偶" + "视".repeat(7) + "𠮷", caption("玩偶" + "视".repeat(7) + "𠮷"))
+        assertEquals("玩偶" + "视".repeat(6) + "𠮷…", caption("玩偶" + "视".repeat(6) + "𠮷留白"))
     }
 
     @Test fun modelTextMustUseJsonBooleansNumbersAndStringEscapes() {
@@ -96,7 +99,7 @@ class RecommendationTest {
     }
 
     @Test fun aVisibleCenterDoesNotExcuseClippingTheFaceAtItsCorner() {
-        val left = source.copy(face = FacePosition(8, Uv(0.19, 0.5), 0.26))
+        val left = source.copy(subject = SubjectPosition(8, Uv(0.19, 0.5), 0.26))
         val plan = Recommendation.validated(fields(0.60, 0.5))!!
         val smaller = plan.targetFrom(left, FaceBox(0.18, 0.48, 0.20, 0.52))
         assertNotNull(smaller)

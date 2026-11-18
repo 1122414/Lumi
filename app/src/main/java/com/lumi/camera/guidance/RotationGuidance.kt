@@ -29,8 +29,8 @@ internal data class Pose(val w: Double, val x: Double, val y: Double, val z: Dou
 
 // Focal lengths and principal point in normalized upright ViewPort coordinates.
 internal data class Lens(val fx: Double, val fy: Double, val cx: Double, val cy: Double)
-internal data class FacePosition(val id: Int, val center: Uv, val width: Double)
-internal data class Observation(val timeNs: Long, val pose: Pose, val lens: Lens, val face: FacePosition?)
+internal data class SubjectPosition(val id: Int, val center: Uv, val width: Double)
+internal data class Observation(val timeNs: Long, val pose: Pose, val lens: Lens, val subject: SubjectPosition?)
 
 internal class RotationProjection(target: Observation, current: Observation) {
     private val a = target.lens
@@ -88,7 +88,7 @@ internal class ReturnDirection(private val target: Observation) {
 }
 
 internal class RotationGuidance(private val target: Observation) {
-    private val subject = requireNotNull(target.face)
+    private val subject = requireNotNull(target.subject)
     private var previous: Observation? = null
     private var since: Long? = null
     private var count = 0
@@ -125,7 +125,7 @@ internal class RotationGuidance(private val target: Observation) {
         val projection = RotationProjection(target, current)
         val center = projection.project(Uv.CENTER) ?: return lost(GuideEvidence.MISMATCH)
         val angle = current.pose.degreesTo(target.pose)
-        val face = current.face
+        val face = current.subject
         if (face == null) {
             resetHold()
             val seen = lastFaceNs

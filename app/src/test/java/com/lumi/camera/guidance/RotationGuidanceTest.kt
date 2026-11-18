@@ -9,7 +9,7 @@ import org.junit.Test
 class RotationGuidanceTest {
     private val origin = Pose(1.0, 0.0, 0.0, 0.0)
     private val lens = Lens(1.2, 0.9, 0.5, 0.5)
-    private val face = FacePosition(7, Uv.CENTER, 0.22)
+    private val face = SubjectPosition(7, Uv.CENTER, 0.22)
     private val target = Observation(0, origin, lens, face)
     private fun pitch(deg: Double): Pose {
         val half = Math.toRadians(deg) / 2
@@ -83,7 +83,7 @@ class RotationGuidanceTest {
 
     @Test fun projectionIsRelativeToTheRememberedPoseNotNorthOrAnUprightPhone() {
         val start = right(67.0) * pitch(23.0)
-        val remembered = target.copy(pose = start, face = face.copy(center = Uv(0.36, 0.42)))
+        val remembered = target.copy(pose = start, subject = face.copy(center = Uv(0.36, 0.42)))
         val current = sample(40, start * right(9.0))
         val ring = RotationProjection(remembered, current).project(Uv.CENTER)!!
         assertEquals(0.5 - lens.fx * tan(Math.toRadians(9.0)), ring.x, 1e-6)
@@ -128,8 +128,8 @@ class RotationGuidanceTest {
             for (ms in 0L..400L step 50) g.feed(sample(ms))
             assertTrue(g.feed(sample(450)).ready)
             val o = sample(500).let { when (reason) {
-                1 -> it.copy(face = null)
-                2 -> it.copy(face = face.copy(id = 8))
+                1 -> it.copy(subject = null)
+                2 -> it.copy(subject = face.copy(id = 8))
                 else -> it
             } }
             val result = g.update(o, o.timeNs + if (reason == 0) 251_000_000 else 0, reason != 3)
@@ -156,13 +156,13 @@ class RotationGuidanceTest {
         val g = RotationGuidance(target)
         for (ms in 0L..400L step 50) g.feed(sample(ms))
         assertTrue(g.feed(sample(450)).ready)
-        val missing = sample(500, right(5.0)).copy(face = null)
+        val missing = sample(500, right(5.0)).copy(subject = null)
         val pending = g.update(missing, missing.timeNs, false)
         assertNotNull(pending.ring)
         assertEquals(0.5 - lens.fx * tan(Math.toRadians(5.0)), pending.ring!!.x, 1e-6)
         assertFalse(pending.ready)
         assertFalse(pending.trusted)
-        assertNull(g.feed(sample(740, right(6.0)).copy(face = null)).ring)
+        assertNull(g.feed(sample(740, right(6.0)).copy(subject = null)).ring)
         assertFalse(g.feed(sample(780)).ready)
         assertNotNull(g.feed(sample(820)).ring)
     }
@@ -183,7 +183,7 @@ class RotationGuidanceTest {
     @Test fun aMissDoesNotFlashTheMergedOverlayOrSkipTheNextHold() {
         val g = RotationGuidance(target)
         for (ms in 0L..450L step 50) g.feed(sample(ms))
-        val miss = g.feed(sample(500).copy(face = null))
+        val miss = g.feed(sample(500).copy(subject = null))
         assertTrue(miss.merged)
         assertFalse(miss.ready)
         for (ms in 550L..850L step 50) {
@@ -203,13 +203,13 @@ class RotationGuidanceTest {
     @Test fun aWrongSubjectOrExpiredFrameDropsTheDirectionUntilFreshFaceEvidence() {
         for (stale in listOf(false, true)) {
             val g = RotationGuidance(target)
-            assertNull(g.feed(sample(0).copy(face = null)).ring)
+            assertNull(g.feed(sample(0).copy(subject = null)).ring)
             g.feed(sample(100))
-            val o = sample(150).let { if (stale) it else it.copy(face = face.copy(id = 23)) }
+            val o = sample(150).let { if (stale) it else it.copy(subject = face.copy(id = 23)) }
             val rejected = g.update(o, o.timeNs + if (stale) 251_000_000L else 0L, true)
             assertNull(rejected.ring)
             assertFalse(rejected.ready)
-            assertNull(g.feed(sample(if (stale) 420 else 180).copy(face = null)).ring)
+            assertNull(g.feed(sample(if (stale) 420 else 180).copy(subject = null)).ring)
             val recovered = g.feed(sample(470))
             assertNotNull(recovered.ring)
             assertFalse(recovered.ready)
@@ -245,7 +245,7 @@ class RotationGuidanceTest {
             val x = 0.5 - lens.fx * tan(Math.toRadians(yaw)) / cos(Math.toRadians(tilt))
             val y = 0.5 + lens.fy * tan(Math.toRadians(tilt))
             val seen = sample(40L * i, right(yaw) * pitch(tilt), Uv(x, y))
-            val current = if (i in 4..5) seen.copy(face = null) else seen
+            val current = if (i in 4..5) seen.copy(subject = null) else seen
             val guide = g.update(current, current.timeNs, backgroundAgrees = i % 3 != 1)
             assertNotNull("both axes keep following the phone at frame $i", guide.ring)
             assertEquals(x, guide.ring!!.x, 1e-6)

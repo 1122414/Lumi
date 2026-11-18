@@ -9,7 +9,8 @@ import kotlin.math.sqrt
 internal data class Probe(val point: Uv, val light: Double)
 internal typealias BackgroundMark = List<Probe>
 
-internal class Background private constructor(private val grid: IntArray) {
+internal class Background(private val grid: IntArray) {
+    init { require(grid.size == W * H) }
     private fun light(p: Uv): Double? {
         val x = p.x * W - 0.5
         val y = p.y * H - 0.5

@@ -11,21 +11,34 @@ import kotlin.math.hypot
 import kotlin.math.sin
 
 internal class Recommendation private constructor(
-    val aimPoint: Uv, val confidence: Double, val alreadyGood: Boolean, val reason: String,
+    val aimPoint: Uv, val confidence: Double, val alreadyGood: Boolean, val reason: String, val subject: SelectedSubject,
 ) {
-    val caption: String = if (reason.codePointCount(0, reason.length) <= 10) reason else {
-        val clause = reason.takeWhile { it !in "，。；！？、,;.!?" }.trim()
-        if (clause.isNotEmpty() && clause.codePointCount(0, clause.length) <= 10) clause
-        else reason.substring(0, reason.offsetByCodePoints(0, 9)) + "…"
+    val caption: String = run {
+        val named = when {
+            subject.name in reason -> reason
+            "主体" in reason -> reason.replace("主体", subject.name)
+            else -> subject.name + "·" + reason
+        }
+        if (named.codePointCount(0, named.length) <= 10) named else {
+            val clause = named.takeWhile { it !in "，。；！？、,;.!?" }.trim()
+            if (subject.name in clause && clause.codePointCount(0, clause.length) <= 10) clause
+            else {
+                val short = named.substring(0, named.offsetByCodePoints(0, 9))
+                if (subject.name in short) "$short…" else {
+                    val withNameFirst = subject.name + "·" + named.substringBefore(subject.name)
+                    withNameFirst.substring(0, withNameFirst.offsetByCodePoints(0, 9)) + "…"
+                }
+            }
+        }
     }
 
     companion object {
         // Android JsonReader also accepts e.g. TRUE and non-JSON string escapes in strict mode.
         private val jsonToken = java.util.regex.Pattern.compile(
-            """[ \t\r\n]+|[{},:]|true|false|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|(?:"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")""")
+            """[ \t\r\n]+|[{}\[\],:]|true|false|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|(?:"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")""")
 
         fun hasJsonTokens(text: String): Boolean {
-            if (text.isEmpty() || text.length > 4096) return false
+            if (text.length > 4096 || !text.trimStart().startsWith('{')) return false
             val tokens = jsonToken.matcher(text)
             var end = 0
             while (tokens.find()) {
@@ -36,7 +49,8 @@ internal class Recommendation private constructor(
         }
 
         fun validated(fields: Map<String, Any?>): Recommendation? {
-            if (fields.keys != setOf("aimPoint", "confidence", "alreadyGood", "reason")) return null
+            if (fields.keys != setOf("aimPoint", "confidence", "alreadyGood", "reason", "subject")) return null
+            val subject = SelectedSubject.parse(fields["subject"]) ?: return null
             val aim = fields["aimPoint"] as? Map<*, *> ?: return null
             if (aim.keys != setOf("x", "y")) return null
             val x = (aim["x"] as? Number)?.toDouble() ?: return null
@@ -47,12 +61,12 @@ internal class Recommendation private constructor(
             if (x !in 0.0..1.0 || y !in 0.0..1.0 || confidence !in 0.70..1.0 ||
                 (good && (x != 0.5 || y != 0.5)) || reason.isEmpty() || reason.length > 80 ||
                 reason.any { it.isISOControl() || it == '\u2028' || it == '\u2029' }) return null
-            return Recommendation(Uv(x, y), confidence, good, reason)
+            return Recommendation(Uv(x, y), confidence, good, reason, subject)
         }
     }
 
     fun targetFrom(source: Observation, box: FaceBox): Observation? {
-        val face = source.face ?: return null
+        val face = source.subject ?: return null
         if (box.left !in 0.0..1.0 || box.right !in 0.0..1.0 || box.top !in 0.0..1.0 ||
             box.bottom !in 0.0..1.0 || box.left >= box.right || box.top >= box.bottom) return null
         if (aimPoint == Uv.CENTER) return source
@@ -76,6 +90,6 @@ internal class Recommendation private constructor(
             p
         }
         val center = projection.project(face.center) ?: return null
-        return target.copy(face = face.copy(center = center, width = corners.maxOf { it.x } - corners.minOf { it.x }))
+        return target.copy(subject = face.copy(center = center, width = corners.maxOf { it.x } - corners.minOf { it.x }))
     }
 }

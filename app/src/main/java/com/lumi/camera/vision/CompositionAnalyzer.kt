@@ -15,7 +15,7 @@ import com.lumi.camera.camera.Crop
 import com.lumi.camera.camera.Extent
 import com.lumi.camera.camera.FrameGeometry
 import com.lumi.camera.camera.Point
-import com.lumi.camera.guidance.FacePosition
+import com.lumi.camera.guidance.SubjectPosition
 import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.Uv
@@ -23,7 +23,8 @@ import java.util.concurrent.atomic.AtomicReference
 
 internal data class FaceBox(val left: Double, val top: Double, val right: Double, val bottom: Double)
 internal data class SceneFrame(val sequence: Long, val capturedNs: Long, val geometry: FrameGeometry,
-    val observation: Observation?, val box: FaceBox?, val background: Background?)
+    val observation: Observation?, val box: FaceBox?, val background: Background?,
+    val pixels: SubjectPixels? = null, val follower: SubjectOutline? = null, val outline: SeenOutline? = null)
 
 internal class CompositionAnalyzer(private val optics: CameraOptics, private val poses: CameraPose,
     private val keepModelFrame: Boolean, private val deliver: (SceneFrame) -> Unit) : ImageAnalysis.Analyzer, AutoCloseable {
@@ -31,6 +32,8 @@ internal class CompositionAnalyzer(private val optics: CameraOptics, private val
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).enableTracking().build())
     private var reportedFailure = false
     private val modelFrame = AtomicReference<RecommendationFrame?>()
+
+    @Volatile var selected: SubjectOutline? = null
 
     // Taking transfers ownership; the analysis worker can immediately replace the slot.
     fun takeModelFrame(): RecommendationFrame? = modelFrame.getAndSet(null)
@@ -54,20 +57,23 @@ internal class CompositionAnalyzer(private val optics: CameraOptics, private val
                     val faces = Tasks.await(detector.process(InputImage.fromMediaImage(media, frame.rotation)))
                     val face = faces.singleOrNull()
                     val id = face?.trackingId
-                    if (faces.size > 1) empty
-                    else if (face == null || id == null) empty.copy(observation = Observation(captured, pose, lens, null))
-                    else {
+                    val box = if (face != null && id != null) {
                         val bounds = face.boundingBox
                         val size = frame.referenceSize
                         val p = frame.uprightToReference(Point(bounds.left.toFloat(), bounds.top.toFloat()))
-                        val box = FaceBox(p.x.toDouble()/size.width, p.y.toDouble()/size.height,
+                        FaceBox(p.x.toDouble()/size.width, p.y.toDouble()/size.height,
                             (p.x + bounds.width()).toDouble()/size.width, (p.y + bounds.height()).toDouble()/size.height)
-                        val center = Uv((box.left + box.right)/2, (box.top + box.bottom)/2)
-                        if (center.x !in 0.0..1.0 || center.y !in 0.0..1.0 || box.right <= box.left) empty
-                        else SceneFrame(ts, captured, frame,
-                            Observation(captured, pose, lens, FacePosition(id, center, box.right - box.left)),
-                            box, Background.read(image, frame))
+                    } else null
+                    val detected = box?.takeIf { it.right > it.left && it.bottom > it.top }?.let {
+                        val center = Uv((it.left + it.right)/2, (it.top + it.bottom)/2)
+                        if (center.x in 0.0..1.0 && center.y in 0.0..1.0) SubjectPosition(id!!, center, it.right - it.left) else null
                     }
+                    val observation = Observation(captured, pose, lens, detected)
+                    val follower = selected
+                    val pixels = if (keepModelFrame || follower != null) SubjectPixels.read(image, frame) else null
+                    val outline = if (follower != null && pixels != null) follower.observe(observation, pixels) else null
+                    val background = if (keepModelFrame || detected != null) Background.read(image, frame) else null
+                    SceneFrame(ts, captured, frame, observation, box, background, pixels, follower, outline)
                 }
             } catch (e: Exception) {
                 if (!reportedFailure) Log.w("LumiCamera", "Composition observation unavailable", e)
@@ -75,7 +81,7 @@ internal class CompositionAnalyzer(private val optics: CameraOptics, private val
                 empty
             }
             if (keepModelFrame) {
-                val next = if (result.box != null &&
+                val next = if (result.pixels != null &&
                     SystemClock.elapsedRealtimeNanos() - captured in 0..RotationGuidance.FRESH_NS) {
                     try { RecommendationFrame(result, image.toBitmap()) } catch (_: RuntimeException) { null }
                 } else null

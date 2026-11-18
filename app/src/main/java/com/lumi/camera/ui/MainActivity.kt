@@ -18,6 +18,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
@@ -125,7 +128,22 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
         Box(Modifier.fillMaxSize().padding(vertical = controlsHeight), contentAlignment = Alignment.Center) {
             Box(Modifier.aspectRatio(3f / 4f).background(Color.Black)) {
                 AndroidView({ preview }, Modifier.matchParentSize())
-                Canvas(Modifier.matchParentSize()) {
+                Canvas(Modifier.matchParentSize().clipToBounds()) {
+                    val points = frame.outline
+                    if (points.isNotEmpty()) {
+                        val path = Path()
+                        val gap = points.indexOf(null)
+                        var drawing = false
+                        for (i in points.indices) {
+                            val p = points[(i + gap + 1) % points.size]
+                            if (p == null) drawing = false
+                            else if (drawing) path.lineTo(p.x, p.y)
+                            else { path.moveTo(p.x, p.y); drawing = true }
+                        }
+                        if (gap == -1) path.close()
+                        drawPath(path, Color(0xFF46A9FF), style = Stroke(width = 2.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()))))
+                    }
                     val mid = center
                     paintRing?.takeIf { alpha > 0f }?.let {
                         val dx = it.x - mid.x
@@ -172,8 +190,7 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, onSession: (CameraSess
                 recommendationStatus != null -> recommendationStatus.orEmpty()
                 frame.hasTarget && frame.ring == null -> "构图暂不可确认"
                 frame.hasTarget -> "构图引导中"
-                !frame.canRemember -> "等待单人画面与手机姿态"
-                else -> ""
+                else -> "对准想拍的人或物"
             }, color = Color.White, fontSize = 14.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(session::recommend, enabled = bound && VisionChat.unavailableReason == null) { Text("推荐构图") }
