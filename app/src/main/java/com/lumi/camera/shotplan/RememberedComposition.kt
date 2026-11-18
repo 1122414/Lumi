@@ -18,7 +18,8 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
         val verified = if (useOutlinePosition) seen?.position else observation.subject?.takeIf {
             seen?.mask?.contains(it.center) == true
         }
-        return observation.copy(subject = verified, completeSubject = seen?.complete == true)
+        return observation.copy(subject = verified, completeSubject = seen?.complete == true,
+            matchedInterior = if (useOutlinePosition) seen?.matchedInterior == true else verified != null)
     }
 
     companion object {

@@ -52,6 +52,21 @@ class RotationGuidanceTest {
         assertEquals(ready, direction.display(ready, target, origin))
     }
 
+    @Test fun aSubjectSidewaysToTheCameraStillHasAnUnambiguousReturnDirection() {
+        val corners = listOf(Uv(0.10,0.20), Uv(0.67,0.20), Uv(0.67,0.82), Uv(0.10,0.82))
+        val direction = ReturnDirection(target, target, corners)
+        for (sign in listOf(1.0, -1.0)) {
+            val sideways = right(sign * 92.0)
+            val projection = RotationProjection(target, target.copy(pose = sideways))
+            assertTrue(corners.any { projection.project(it) == null })
+            assertTrue(corners.any { projection.project(it) != null })
+            val guide = direction.display(Guide(null), null, sideways)
+            assertEquals(if (sign > 0) 0.0 else 1.0, guide.ring!!.x, 1e-8)
+            assertFalse(guide.ready)
+        }
+        assertNull(direction.display(Guide(null), null, right(20.0)).ring)
+    }
+
     @Test fun worldDirectionUsesTheRecommendedPoseAndTurnsTheOtherWayAfterPassingTheAntipode() {
         val start = right(65.0) * pitch(13.0)
         val direction = ReturnDirection(target.copy(pose = start, lens = lens.copy(cx = 0.46, cy = 0.52)))
@@ -74,7 +89,10 @@ class RotationGuidanceTest {
         val guidance = RotationGuidance(target, verifyScene=true)
         for (t in 0L..450L step 50) guidance.feed(sample(t))
         val changed = sample(900)
-        assertNull(guidance.update(changed, changed.timeNs, false).ring)
+        val checking = guidance.update(changed, changed.timeNs, false)
+        assertEquals(Uv.CENTER, checking.ring)
+        assertEquals(GuideEvidence.VERIFYING_COMPOSITION, checking.evidence)
+        assertFalse(checking.ready)
         for (t in 950L..1250L step 50) assertFalse(guidance.feed(sample(t)).ready)
         assertTrue(guidance.feed(sample(1300)).ready)
     }
@@ -86,17 +104,17 @@ class RotationGuidanceTest {
             listOf(Uv(0.3,0.2), Uv(0.7,0.2), Uv(0.7,0.8), Uv(0.3,0.8)))
         val current = sample(100)
         val mismatch = Guide(null, evidence = GuideEvidence.MISMATCH)
-        val backgroundGap = Guide(Uv.CENTER, evidence = GuideEvidence.BACKGROUND_UNCERTAIN, merged = true)
-        for (unconfirmed in listOf(mismatch, backgroundGap)) {
-            for (pose in listOf(origin, right(12.0), targetPose)) {
-                val projected = RotationProjection(goal, current.copy(pose = pose)).project(Uv.CENTER)!!
-                val shown = direction.display(unconfirmed, current, pose, subjectVisible = true)
-                assertEquals(GuideEvidence.VERIFYING_COMPOSITION, shown.evidence)
-                assertTrue(projected.distance(shown.ring!!) < 1e-6)
-                assertFalse(shown.ready)
-                assertFalse(shown.merged)
-            }
+        val measured = Uv(0.58, 0.43)
+        val backgroundGap = Guide(measured, evidence = GuideEvidence.VERIFYING_COMPOSITION)
+        for (pose in listOf(origin, right(12.0), targetPose)) {
+            val projected = RotationProjection(current, current.copy(pose = pose)).project(measured)!!
+            val shown = direction.display(backgroundGap, current, pose, subjectVisible = true)
+            assertEquals(GuideEvidence.VERIFYING_COMPOSITION, shown.evidence)
+            assertTrue(projected.distance(shown.ring!!) < 1e-6)
+            assertFalse(shown.ready)
+            assertFalse(shown.merged)
         }
+        assertNull(direction.display(mismatch, current, origin, subjectVisible = true).ring)
         assertNull(direction.display(mismatch, current, origin, subjectVisible = false).ring)
         assertNull(direction.display(mismatch, current.copy(subject = face.copy(id = 8)), origin, true).ring)
         assertNull(direction.display(mismatch, current.copy(subject = null), origin, true).ring)
@@ -112,6 +130,65 @@ class RotationGuidanceTest {
             assertEquals(expected.x, guide.ring!!.x, 1e-6)
             assertEquals(expected.y, guide.ring.y, 1e-6)
             assertFalse(guide.ready)
+        }
+    }
+
+    @Test fun imagePlacementDeterminesTheDirectionEvenWhenHeadingPointsTheOtherWay() {
+        val wanted = target.copy(subject = face.copy(center = Uv(0.35, 0.5)))
+        val direction = ReturnDirection(wanted, wanted, listOf(Uv(0.2,0.3), Uv(0.5,0.7)))
+        val guidance = RotationGuidance(wanted, verifyScene = true)
+        // Independent horizontal pinhole calculation from measured pixel positions.
+        // Move the subject left through its desired position, with the same biased IMU reading.
+        for ((i, x) in listOf(0.48, 0.41, 0.35, 0.30).withIndex()) {
+            val frame = sample((i+1)*80L, right(12.0), Uv(x,0.5))
+            val actual = direction.display(guidance.update(frame, frame.timeNs, false), frame, frame.pose, true)
+            val a = (x - lens.cx) / lens.fx
+            val b = (0.35 - lens.cx) / lens.fx
+            val expected = lens.cx + lens.fx*(a-b)/(1+a*b)
+            assertEquals("ring for measured x=$x", expected, actual.ring!!.x, 0.002)
+            assertEquals(0.5, actual.ring.y, 0.002)
+            assertFalse(actual.ready)
+        }
+    }
+
+    @Test fun rollRotatesTheDesiredOffsetAroundTheMeasuredSubjectAndDoesNotSwapPhoneAxes() {
+        val h = Math.PI/4
+        val rolled = Pose(cos(h), 0.0, 0.0, sin(h))
+        val wanted = target.copy(subject = face.copy(center = Uv(0.6,0.5)))
+        // After a quarter turn the +x subject offset appears down the portrait image.
+        val y = 0.5 + 0.1 * lens.fy / lens.fx
+        val current = sample(50, rolled, Uv(0.5,y))
+        val actual = RotationGuidance(wanted, true).update(current,current.timeNs,false)
+        assertEquals(0.5, actual.ring!!.x, 1e-6)
+        assertEquals(0.5, actual.ring.y, 1e-6)
+        assertFalse(actual.ready)
+    }
+
+    @Test fun identifiedInteriorKeepsTheOvershootDirectionEvenWhenTheSilhouetteIsIncomplete() {
+        val guidance = RotationGuidance(target, true)
+        for (i in 1..12) {
+            val frame = sample(i*50L, right(-3.0), Uv(0.47, 0.5)).copy(completeSubject = false, matchedInterior = true)
+            val guide = guidance.update(frame, frame.timeNs, true)
+            assertEquals(0.47, guide.ring!!.x, 1e-6)
+            assertEquals(GuideEvidence.PARTIAL_SUBJECT, guide.evidence)
+            assertFalse(guide.ready)
+        }
+    }
+
+    @Test fun alignedPixelsStillNeedMatchingBackgroundAndAStationaryPhone() {
+        val guidance = RotationGuidance(target, true)
+        for (i in 1..18) {
+            val current = sample(i*50L, right(if (i % 2 == 0) 8.0 else 12.0))
+            val guide = guidance.update(current, current.timeNs) { measured ->
+                assertTrue(measured.pose.degreesTo(origin) < 0.001)
+                i > 8
+            }
+            assertEquals(0.5, guide.ring!!.x, 1e-6)
+            assertFalse(guide.ready)
+        }
+        for (i in 19..30) {
+            val current = sample(i*50L, right(5.0))
+            assertEquals(i >= 26, guidance.feed(current).ready)
         }
     }
 

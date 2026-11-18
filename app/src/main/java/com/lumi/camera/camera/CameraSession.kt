@@ -239,8 +239,9 @@ internal class CameraSession(
         if (t != null) {
             val current = t.target.current(frame)
             t.visual = if (current == null) t.guidance.lost() else {
-                val agrees = frame.background?.agrees(t.target.marks, RotationProjection(t.target.backgroundSource, current)) == true
-                t.guidance.update(current, now, agrees)
+                t.guidance.update(current, now) { view ->
+                    frame.background?.agrees(t.target.marks, RotationProjection(t.target.backgroundSource, view)) == true
+                }
             }
         }
         render()

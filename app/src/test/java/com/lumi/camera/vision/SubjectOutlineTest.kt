@@ -86,11 +86,12 @@ class SubjectOutlineTest {
                 (level shl 16) or ((255-level) shl 8) or level
             }
         })
+        var omitRightEdge = false
         val foreground: SegmentAt = { image, seed ->
             val mask = ByteArray(image.width*image.height) { j ->
                 val x = (j % image.width + 0.5) / image.width
                 val y = (j / image.width + 0.5) / image.height
-                if (image.at(x, y) == wall) -1 else 0
+                if (image.at(x, y) == wall || (omitRightEdge && x > 0.68)) -1 else 0
             }
             ForegroundMask.at(image.width,image.height,mask,seed)
         }
@@ -99,6 +100,11 @@ class SubjectOutlineTest {
             val now = source.copy(timeNs = (index + 1) * 70_000_000L)
             assertEquals("same toy at frame $index", true, outline.observe(now, pixels)?.complete)
         }
+        omitRightEdge = true
+        val seen = outline.observe(source.copy(timeNs = 630_000_000L), pixels)!!
+        assertTrue(seen.mask.bounds.right < outline.bounds.right - 0.02)
+        assertTrue("source=${outline.sourceSubject.center} measured=${seen.position.center} interior=${seen.matchedInterior}",
+            seen.position.center.distance(outline.sourceSubject.center) < 0.005)
     }
 
     @Test fun nonHumanRecommendationCanReachReadyWithoutAnyFaceAndRejectsAnotherTargetsOutline() {

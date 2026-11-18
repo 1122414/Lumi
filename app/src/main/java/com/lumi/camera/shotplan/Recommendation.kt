@@ -1,14 +1,9 @@
 package com.lumi.camera.shotplan
 
 import com.lumi.camera.guidance.Observation
-import com.lumi.camera.guidance.Pose
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.guidance.Uv
 import com.lumi.camera.vision.FaceBox
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.hypot
-import kotlin.math.sin
 
 internal class Recommendation private constructor(
     val aimPoint: Uv, val confidence: Double, val alreadyGood: Boolean, val reason: String, val subject: SelectedSubject,
@@ -73,14 +68,7 @@ internal class Recommendation private constructor(
 
         // Device axes: right, up, towards the photographer. The visible center may
         // differ from the optical axis after the shared ViewPort crop.
-        fun look(at: Uv): Pose {
-            val x = (at.x - source.lens.cx) / source.lens.fx
-            val y = (source.lens.cy - at.y) / source.lens.fy
-            val yaw = -atan2(x, 1.0) / 2
-            val pitch = atan2(y, hypot(x, 1.0)) / 2
-            return Pose(cos(yaw), 0.0, sin(yaw), 0.0) * Pose(cos(pitch), sin(pitch), 0.0, 0.0)
-        }
-        val pose = source.pose * (look(aimPoint) * look(Uv.CENTER).inverse())
+        val pose = source.pose * (source.lens.lookAt(aimPoint) * source.lens.lookAt(Uv.CENTER).inverse())
         val target = source.copy(pose = pose)
         val projection = RotationProjection(source, target)
         val corners = listOf(Uv(box.left, box.top), Uv(box.right, box.top),

@@ -8,7 +8,8 @@ import com.lumi.camera.shotplan.SelectedSubject
 import kotlin.math.abs
 import kotlin.math.hypot
 
-internal data class SeenOutline(val mask: ForegroundMask, val position: SubjectPosition, val complete: Boolean) {
+internal data class SeenOutline(val mask: ForegroundMask, val position: SubjectPosition, val complete: Boolean,
+    val matchedInterior: Boolean = false) {
     val points get() = mask.points
 }
 internal typealias SegmentAt = (SubjectPixels, Uv) -> ForegroundMask?
@@ -19,11 +20,11 @@ internal class SubjectOutline private constructor(private val source: Observatio
     private val original: ForegroundMask, private val sourceRegion: FaceBox, private val selection: List<Uv>, private val referenceComplete: Boolean, private val samples: List<Sample>, private val segment: SegmentAt) {
     private data class Sample(val p: Uv, val color: Int)
     val bounds get() = original.bounds
-    val sourceSubject = position(original)
     fun containsAtCapture(p: Uv) = original.contains(p)
     private var lastSeed = seed
     private var lastScale = 1.0
     private val distinctive = samples.any { a -> samples.count { colorError(a.color,it.color)>52 } >= samples.size/3 }
+    val sourceSubject = position(original, seed)
     private var lastTime = source.timeNs
     private var retrySource = false
 
@@ -47,12 +48,10 @@ internal class SubjectOutline private constructor(private val source: Observatio
         var bestCost = Double.POSITIVE_INFINITY
         var at = predicted
         var scale = 1.0
-        fun locate(reach: Int, step: Double, scales: List<Double>) {
+        fun locate(reach: Int, step: Double, scales: List<Double>, around: Uv = predicted) {
             for (factor in scales) for (y in -reach..reach) for (x in -reach..reach) {
-                val dx = x*step
-                val dy = y*step
-                val cx = predicted.x+dx
-                val cy = predicted.y+dy
+                val cx = around.x + x*step
+                val cy = around.y + y*step
                 if (cx !in 0.0..<1.0 || cy !in 0.0..<1.0) continue
                 var visible = 0
                 var error = 0.0
@@ -62,13 +61,14 @@ internal class SubjectOutline private constructor(private val source: Observatio
                     error += colorError(color,sample.color).coerceAtMost(95.0)
                 }
                 if (visible < maxOf(5,projected.size/3)) continue
-                val cost = error/visible + 16*hypot(dx,dy) + 6*abs(factor-lastScale) + 4.0*(1-visible.toDouble()/projected.size)
+                val cost = error/visible + 16*hypot(cx-predicted.x,cy-predicted.y) + 6*abs(factor-lastScale) + 4.0*(1-visible.toDouble()/projected.size)
                 if (cost < bestCost) { bestCost = cost; at = Uv(cx,cy); scale = factor }
             }
         }
         locate(4, 0.032, listOf(lastScale,1.0,0.80,1.18))
         if (distinctive && bestCost > 19) locate(10,0.042,listOf(0.75,0.9,1.0,1.2))
         if (!bestCost.isFinite()) return null
+        if (distinctive) locate(3, 0.007, listOf(scale), at)
         fun shifted(p: Uv) = Uv(at.x+(p.x-predicted.x)*scale, at.y+(p.y-predicted.y)*scale)
         fun project(p: Uv) = projection.project(Uv(p.x+base.x-seed.x,p.y+base.y-seed.y))?.let(::shifted)
         val projectedSelection = selection.mapNotNull(::project)
@@ -116,14 +116,13 @@ internal class SubjectOutline private constructor(private val source: Observatio
         val fraction = mask.area.toDouble() / (mask.width*mask.height)
         val reference = original.area.toDouble() / (original.width*original.height)
         if (fraction/reference !in 0.20..1.85) return null
-        val subject = position(mask)
         val entire = referenceComplete && !clipped && fraction/reference in 0.7..1.45 && confirmed >= samples.size*0.68
         // When interior colours cannot distinguish nearby positions, use the verified extent.
         val next = if (entire && !distinctive) aligned(at) else at
         lastSeed = RotationProjection(current,source).project(next) ?: base
         lastScale = scale
         lastTime = current.timeNs
-        return SeenOutline(mask, subject, entire)
+        return SeenOutline(mask, position(mask, next), entire, matchedInterior = distinctive && mask.contains(next))
     }
 
     // After a miss the old crop may itself exclude the subject. Re-segment the full view,
@@ -148,15 +147,17 @@ internal class SubjectOutline private constructor(private val source: Observatio
         lastSeed = RotationProjection(current,source).project(register(seed)) ?: return null
         lastScale = (sx+sy)/2
         lastTime = current.timeNs
-        return SeenOutline(mask,position(mask),referenceComplete && hits >= samples.size*0.72)
+        return SeenOutline(mask,position(mask, register(seed)),referenceComplete && hits >= samples.size*0.72)
+    }
+
+    // A changing silhouette can shift its bounding-box center on a stationary toy.
+    private fun position(mask: ForegroundMask, matchedSeed: Uv): SubjectPosition {
+        val b = mask.bounds
+        val center = if (distinctive) matchedSeed else Uv((b.left+b.right)/2, (b.top+b.bottom)/2)
+        return SubjectPosition(0, center, b.right-b.left)
     }
 
     companion object {
-        private fun position(mask: ForegroundMask): SubjectPosition {
-            val b = mask.bounds
-            return SubjectPosition(0, Uv((b.left+b.right)/2, (b.top+b.bottom)/2), b.right-b.left)
-        }
-
         private fun colorError(a: Int, b: Int): Double = 0.55*abs((a shr 16)-(b shr 16)) +
             abs((a shr 8 and 255)-(b shr 8 and 255)) + abs((a and 255)-(b and 255))
 
@@ -194,7 +195,9 @@ internal class SubjectOutline private constructor(private val source: Observatio
             if (overlap < (b.right-b.left)*(b.bottom-b.top)*0.50) return null
             val samples = mutableListOf<Sample>()
             for (row in 0 until 9) for (col in 0 until 7) {
-                val p = Uv(b.left+(col+0.5)*(b.right-b.left)/7, b.top+(row+0.5)*(b.bottom-b.top)/9)
+                val x = ((b.left+(col+0.5)*(b.right-b.left)/7)*image.width).toInt()
+                val y = ((b.top+(row+0.5)*(b.bottom-b.top)/9)*image.height).toInt()
+                val p = Uv((x+0.5)/image.width, (y+0.5)/image.height)
                 if (mask.contains(p)) image.at(p.x,p.y)?.let { samples.add(Sample(p,it)) }
             }
             val complete = b.right-b.left >= 0.78*(box.right-box.left) && b.bottom-b.top >= 0.78*(box.bottom-box.top) &&
