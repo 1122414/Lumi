@@ -34,12 +34,13 @@ import com.lumi.camera.guidance.ReturnDirection
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.shotplan.ModelFailure
-import com.lumi.camera.shotplan.Recommendation
+import com.lumi.camera.shotplan.ModelReply
 import com.lumi.camera.shotplan.RecommendationRequests
 import com.lumi.camera.shotplan.RememberedComposition
 import com.lumi.camera.shotplan.RequestToken
 import com.lumi.camera.shotplan.VisionChat
 import com.lumi.camera.vision.CompositionAnalyzer
+import com.lumi.camera.vision.SubjectOutline
 import com.lumi.camera.vision.SceneFrame
 import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
@@ -92,6 +93,8 @@ internal class CameraSession(
             Log.d("LumiGuidance", "evidence=${guide.evidence} ring=${guide.ring != null} ready=${guide.ready} outline=$outlined")
         }
     }
+    private data class Selection(val name: String, val geometry: FrameGeometry, val outline: SubjectOutline?)
+    private var selection: Selection? = null
     private var run: Run? = null
     private var latest: SceneFrame? = null
     private var poses: CameraPose? = null
@@ -104,7 +107,7 @@ internal class CameraSession(
     private var disposed = false
     private val drawDirection = object : Runnable {
         override fun run() {
-            if (this@CameraSession.run == null || binding == null) return
+            if ((this@CameraSession.run == null && selection?.outline == null) || binding == null) return
             render()
             view.postOnAnimation(this)
         }
@@ -192,8 +195,10 @@ internal class CameraSession(
             cancelRecommendation()
             onRecommendationStatus("取景尺寸已变化，请重新推荐。")
         }
-        if (run?.target?.geometry?.let { it != frame.geometry } == true) {
+        if ((run?.target?.geometry ?: selection?.geometry)?.let { it != frame.geometry } == true) {
             run = null
+            selection = null
+            onRecommendationStatus(null)
             observer?.selected = null
         }
         if (age !in 0..RotationGuidance.FRESH_NS) {
@@ -219,21 +224,22 @@ internal class CameraSession(
         val fresh = latest?.takeIf { now - it.capturedNs in 0..RotationGuidance.FRESH_NS }
         val current = fresh?.observation
         val active = run
-        if (active == null) {
+        val identified = selection
+        val geometry = active?.target?.geometry ?: identified?.geometry
+        if (geometry == null) {
             onFrame(Viewfinder(canRemember = current?.subject != null))
             return
         }
-        val visual = if (fresh != null) active.visual else Guide(null, evidence = GuideEvidence.STALE)
+        val visual = if (fresh != null && active != null) active.visual else Guide(null, evidence = GuideEvidence.STALE)
         val pose = poses?.latestAt(now)
-        val guide = active.direction.display(visual, current, pose)
-        if (guide.evidence == GuideEvidence.RETURN_DIRECTION && (visual.ready || visual.merged)) {
+        val guide = active?.direction?.display(visual, current, pose) ?: Guide(null)
+        if (active != null && guide.evidence == GuideEvidence.RETURN_DIRECTION && (visual.ready || visual.merged)) {
             active.visual = active.guidance.lost()
         }
-        val geometry = active.target.geometry
         val ref = geometry.referenceSize
         val mapping = FrameMapping(geometry, size)
         fun preview(p: Uv) = mapping.referenceToPreview(Point((p.x * ref.width).toFloat(), (p.y * ref.height).toFloat()))
-        val seen = fresh?.outline?.takeIf { fresh.follower === active.target.outline }
+        val seen = fresh?.outline?.takeIf { fresh.follower === identified?.outline }
         val outline = if (seen == null || current == null) emptyList() else {
             val projection = pose?.let { RotationProjection(current, current.copy(pose = it)) }
             seen.points.map { point ->
@@ -241,9 +247,9 @@ internal class CameraSession(
                 p?.let(::preview)
             }
         }
-        active.trace(guide, outline.any { it != null }, now)
-        onFrame(Viewfinder(current?.subject != null, true, guide.ring?.let(::preview), guide.ready,
-            guide.merged, active.reason, outline))
+        active?.trace(guide, outline.any { it != null }, now)
+        onFrame(Viewfinder(current?.subject != null, active != null, guide.ring?.let(::preview), guide.ready,
+            guide.merged, active?.reason ?: identified?.name, outline))
     }
 
     private fun startGuide(target: RememberedComposition, reason: String? = null) {
@@ -270,6 +276,7 @@ internal class CameraSession(
         val target = RememberedComposition.from(frame) ?: return
         cancelRecommendation()
         onRecommendationStatus(null)
+        selection = null
         startGuide(target)
     }
 
@@ -278,6 +285,7 @@ internal class CameraSession(
         val now = SystemClock.elapsedRealtimeNanos()
         cancelRecommendation()
         run = null
+        selection = null
         observer?.selected = null
         onFrame(Viewfinder(canRemember = latest?.observation?.subject != null))
         val sample = observer?.takeModelFrame()
@@ -308,7 +316,7 @@ internal class CameraSession(
     }
 
     private fun finishRecommendation(token: RequestToken, source: SceneFrame,
-        result: Result<Recommendation>, elapsedMs: Long) {
+        result: Result<ModelReply>, elapsedMs: Long) {
         val completion = requests.finish(token, SystemClock.elapsedRealtimeNanos())
         if (completion == RecommendationRequests.Completion.OBSOLETE) return
         handler.removeCallbacks(timeout)
@@ -318,7 +326,7 @@ internal class CameraSession(
             onRecommendationStatus(VisionChat.TIMEOUT_NOTICE)
             return
         }
-        val plan = result.getOrElse {
+        val reply = result.getOrElse {
             onRecommendationStatus(when (it) {
                 is ModelFailure -> it.notice
                 is SocketTimeoutException -> VisionChat.TIMEOUT_NOTICE
@@ -326,13 +334,25 @@ internal class CameraSession(
             })
             return
         }
-        Log.i("LumiRecommendation", "modelMs=$elapsedMs aimPoint=(${plan.aimPoint.x},${plan.aimPoint.y}) " +
-            "confidence=${plan.confidence} alreadyGood=${plan.alreadyGood} reason=" + VisionChat.logReason(plan.reason))
-        val target = RememberedComposition.from(source, plan)
-        if (target == null) {
-            onRecommendationStatus("无法确认${plan.subject.name}的完整轮廓，请重新推荐。")
+        val selected = reply.subject
+        val pose = source.observation
+        val pixels = source.pixels
+        val outline = if (selected != null && pose != null && pixels != null)
+            SubjectOutline.from(pose, selected.outline, pixels) else null
+        selection = Selection(reply.name, source.geometry, outline)
+        val plan = reply.plan
+        val target = if (plan != null && outline != null) RememberedComposition.from(source, plan, outline) else null
+        if (plan == null || target == null) {
+            observer?.selected = outline
+            view.removeCallbacks(drawDirection)
+            if (outline != null) view.postOnAnimation(drawDirection)
+            Log.i("LumiRecommendation", "modelMs=$elapsedMs identified=true outline=${outline != null} plan=false")
+            onRecommendationStatus(if (outline == null) "主体边缘暂未确认" else "已识别主体，暂无可信构图")
+            render()
             return
         }
+        Log.i("LumiRecommendation", "modelMs=$elapsedMs aimPoint=(${plan.aimPoint.x},${plan.aimPoint.y}) " +
+            "confidence=${plan.confidence} alreadyGood=${plan.alreadyGood} reason=" + VisionChat.logReason(plan.reason))
         onRecommendationStatus(null)
         startGuide(target, plan.caption)
     }
@@ -374,6 +394,7 @@ internal class CameraSession(
         onRecommendationStatus(null)
         latest = null
         run = null
+        selection = null
         poses?.close()
         poses = null
         handler.removeCallbacks(expire)

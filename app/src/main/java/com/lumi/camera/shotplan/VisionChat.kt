@@ -54,7 +54,7 @@ internal class VisionChat(private val token: RequestToken) {
         return ((remaining + 999_999L) / 1_000_000L).toInt()
     }
 
-    fun send(jpeg: ByteArray): Recommendation {
+    fun send(jpeg: ByteArray): ModelReply {
         remainingMs()
         val payload = ChatProtocol.request(BuildConfig.LUMI_LLM_MODEL, jpeg)
         val url = checkNotNull(endpoint)
@@ -87,7 +87,7 @@ internal class VisionChat(private val token: RequestToken) {
                 out.toString("UTF-8")
             }
             return try { ChatProtocol.response(body) } catch (_: Exception) { null }
-                ?: throw ModelFailure("未获得可信的推荐构图，可以重新推荐。")
+                ?: throw ModelFailure("模型未返回可识别的主体，请重新推荐。")
         } finally {
             connection.compareAndSet(conn, null)
             conn.disconnect()

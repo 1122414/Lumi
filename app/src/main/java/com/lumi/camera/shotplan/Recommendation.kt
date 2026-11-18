@@ -35,10 +35,10 @@ internal class Recommendation private constructor(
     companion object {
         // Android JsonReader also accepts e.g. TRUE and non-JSON string escapes in strict mode.
         private val jsonToken = java.util.regex.Pattern.compile(
-            """[ \t\r\n]+|[{}\[\],:]|true|false|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|(?:"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")""")
+            """[ \t\r\n]+|[{}\[\],:]|true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|(?:"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")""")
 
         fun hasJsonTokens(text: String): Boolean {
-            if (text.length > 4096 || !text.trimStart().startsWith('{')) return false
+            if (text.length > 8192 || !text.trimStart().startsWith('{')) return false
             val tokens = jsonToken.matcher(text)
             var end = 0
             while (tokens.find()) {
@@ -91,5 +91,17 @@ internal class Recommendation private constructor(
         }
         val center = projection.project(face.center) ?: return null
         return target.copy(subject = face.copy(center = center, width = corners.maxOf { it.x } - corners.minOf { it.x }))
+    }
+}
+
+
+// An identified subject can survive a rejected composition, but can never confer readiness.
+internal data class ModelReply(val name: String, val subject: SelectedSubject?, val plan: Recommendation?) {
+    companion object {
+        fun from(fields: Map<String, Any?>, complete: Boolean): ModelReply? {
+            val name = SelectedSubject.nameOf(fields["subject"]) ?: return null
+            val plan = if (complete) Recommendation.validated(fields) else null
+            return ModelReply(name, plan?.subject ?: SelectedSubject.parse(fields["subject"]), plan)
+        }
     }
 }

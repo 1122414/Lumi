@@ -18,15 +18,21 @@ internal class SelectedSubject private constructor(val name: String, val person:
     }
 
     companion object {
+        const val MAX_VERTICES = 128
+
+        fun nameOf(raw: Any?): String? {
+            val name = ((raw as? Map<*, *>)?.get("name") as? String)?.trim() ?: return null
+            return name.takeIf { it.codePointCount(0, it.length) in 1..6 && it.all(Char::isLetterOrDigit) &&
+                it !in setOf("主体", "物体", "对象") }
+        }
+
         fun parse(raw: Any?): SelectedSubject? {
             val fields = raw as? Map<*, *> ?: return null
             if (fields.keys != setOf("name", "kind", "outline")) return null
-            val name = (fields["name"] as? String)?.trim() ?: return null
-            if (name.codePointCount(0, name.length) !in 1..6 || !name.all { it.isLetterOrDigit() } ||
-                name in setOf("主体", "物体", "对象")) return null
+            val name = nameOf(fields) ?: return null
             val person = when (fields["kind"]) { "person" -> true; "object" -> false; else -> return null }
             val vertices = fields["outline"] as? List<*> ?: return null
-            if (vertices.size !in 6..32) return null
+            if (vertices.size !in 6..MAX_VERTICES) return null
             fun coordinate(n: Any?): Double? = (n as? Number)?.toDouble()?.takeIf {
                 it in 0.0..1000.0 && it == it.toInt().toDouble()
             }?.div(1000)

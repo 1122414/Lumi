@@ -90,6 +90,44 @@ class RecommendationTest {
         assertEquals("玩偶" + "视".repeat(6) + "𠮷…", caption("玩偶" + "视".repeat(6) + "𠮷留白"))
     }
 
+    @Test fun aRejectedAimOrLowScoreStillIdentifiesTheToyAnywhereInTheFrame() {
+        for (dx in listOf(-275, 0, 265)) {
+            val shifted = selected + ("outline" to listOf(listOf(400+dx,300), listOf(500+dx,350),
+                listOf(600+dx,300), listOf(640+dx,680), listOf(500+dx,700), listOf(370+dx,680)))
+            val valid = fields() + ("subject" to shifted)
+            for (fields in listOf(valid + ("confidence" to 0.56), valid - "aimPoint", valid + ("reason" to null))) {
+                val reply = ModelReply.from(fields, complete = true)!!
+                assertEquals("玩偶", reply.name)
+                assertNotNull(reply.subject)
+                assertNull(reply.plan)
+            }
+            val partial = ModelReply.from(valid, complete = false)!!
+            assertNotNull(partial.subject)
+            assertNull(partial.plan)
+            assertNotNull(ModelReply.from(valid, complete = true)!!.plan)
+        }
+    }
+
+    @Test fun aDetailedRealModelSizedContourCanGenerateAPlan() {
+        val points = (0 until 41).map {
+            val angle = it * 2 * Math.PI / 41
+            listOf((660 + 120 * cos(angle)).toInt(), (510 + 200 * sin(angle)).toInt())
+        }
+        val detailed = selected + ("outline" to points)
+        val reply = ModelReply.from(fields(0.62, 0.5) + ("subject" to detailed), complete = true)!!
+        assertEquals(41, reply.subject!!.outline.size)
+        assertNotNull(reply.plan)
+    }
+
+    @Test fun aNameWithoutUsableGeometryDoesNotCreateAnOutlineOrAGreenRing() {
+        val missing = fields() + ("subject" to mapOf("name" to "兔子玩偶", "kind" to "object"))
+        val reply = ModelReply.from(missing, complete = true)!!
+        assertEquals("兔子玩偶", reply.name)
+        assertNull(reply.subject)
+        assertNull(reply.plan)
+        assertNull(ModelReply.from(fields() - "subject", complete = true))
+    }
+
     @Test fun modelTextMustUseJsonBooleansNumbersAndStringEscapes() {
         val example = """{"aimPoint":{"x":0.5,"y":5e-1},"confidence":1,"alreadyGood":true,"reason":"人物与\u80cc景。"}"""
         assertTrue(Recommendation.hasJsonTokens(example))

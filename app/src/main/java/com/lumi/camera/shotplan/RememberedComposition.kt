@@ -3,6 +3,8 @@ package com.lumi.camera.shotplan
 import com.lumi.camera.camera.FrameGeometry
 import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.RotationProjection
+import com.lumi.camera.guidance.SubjectPosition
+import com.lumi.camera.guidance.Uv
 import com.lumi.camera.vision.BackgroundMark
 import com.lumi.camera.vision.SceneFrame
 import com.lumi.camera.vision.SubjectOutline
@@ -19,7 +21,7 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
     }
 
     companion object {
-        fun from(frame: SceneFrame, recommendation: Recommendation? = null): RememberedComposition? {
+        fun from(frame: SceneFrame, recommendation: Recommendation? = null, selectedOutline: SubjectOutline? = null): RememberedComposition? {
             val observation = frame.observation ?: return null
             val background = frame.background ?: return null
             if (recommendation == null) {
@@ -29,10 +31,16 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
             }
             val selected = recommendation.subject
             val pixels = frame.pixels ?: return null
-            val outline = SubjectOutline.from(observation, selected.outline, pixels) ?: return null
+            val outline = selectedOutline ?: SubjectOutline.from(observation, selected.outline, pixels) ?: return null
             val subject = if (selected.person) {
                 observation.subject?.takeIf { selected.contains(it.center) }
-            } else outline.observe(observation, pixels)?.subject
+            } else {
+                val bounds = selected.bounds
+                // This is the planned subject in the sent frame. Readiness still uses fresh visible edges.
+                outline.observe(observation, pixels)?.subject ?: SubjectPosition(0,
+                    Uv((bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2),
+                    bounds.right - bounds.left)
+            }
             if (subject == null) return null
             val source = observation.copy(subject = subject)
             val box = if (selected.person) frame.box ?: return null else selected.bounds

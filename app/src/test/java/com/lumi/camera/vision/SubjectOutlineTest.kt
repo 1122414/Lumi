@@ -22,11 +22,11 @@ class SubjectOutlineTest {
     private val source = Observation(0, Pose(1.0,0.0,0.0,0.0), Lens(1.1,0.85,0.5,0.5), null)
 
     private fun image(dx: Double = 0.0, dy: Double = 0.0, pose: Observation = source,
-        covered: Boolean = false): SubjectPixels {
+        covered: Boolean = false, visibleAbove: Double = 1.0): SubjectPixels {
         val inverse = RotationProjection(pose, source)
         val data = IntArray(120 * 160) { i ->
             val p = inverse.project(Uv((i%120 + 0.5)/120, (i/120 + 0.5)/160))
-            val isToy = p != null && !covered && toy.contains(Uv(p.x-dx, p.y-dy))
+            val isToy = p != null && !covered && p.y < visibleAbove && toy.contains(Uv(p.x-dx, p.y-dy))
             val neighbour = p != null && toy.contains(Uv(p.x+0.32, p.y)) // Another instance on the left.
             if (isToy || neighbour) 0xdc6c99 else 0x668477
         }
@@ -83,6 +83,20 @@ class SubjectOutlineTest {
         assertTrue(ready)
         val obsolete = SubjectOutline.from(source,toy.outline,pixels)
         assertNull(target.current(frame.copy(follower = obsolete, outline = follower.observe(source,pixels)))!!.subject)
+    }
+
+    @Test fun visiblePartsOfTheSilhouetteCanGuideWithoutDeclaringTheWholeSubjectReady() {
+        val pixels = image(visibleAbove = 0.50)
+        val frame = SceneFrame(1,0,FrameGeometry(Extent(120,160), Crop(0,0,120,160), 0), source,
+            null, Background(IntArray(40*52)), pixels)
+        val plan = Recommendation.validated(mapOf("aimPoint" to mapOf("x" to 0.55, "y" to 0.5),
+            "confidence" to 0.86, "alreadyGood" to false, "reason" to "玩偶耳边留白", "subject" to fields))!!
+        val target = RememberedComposition.from(frame, plan)!!
+        val seen = target.outline!!.observe(source, pixels)!!
+        assertTrue(seen.points.any { it != null })
+        assertNull(seen.subject)
+        val current = target.current(frame.copy(follower = target.outline, outline = seen))!!
+        assertFalse(RotationGuidance(target.observation).update(current, current.timeNs, true).ready)
     }
 
     @Test fun malformedAndSelfCrossingSubjectPolygonsAreRejected() {
