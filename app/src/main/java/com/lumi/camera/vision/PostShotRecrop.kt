@@ -11,6 +11,8 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import com.lumi.camera.shotplan.DirectorCue
+import com.lumi.camera.shotplan.PhotoQualityEvaluator
+import com.lumi.camera.shotplan.PhotoQualityScore
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -41,6 +43,7 @@ internal data class PostShotReview(
     val photoUri: Uri,
     val summary: String,
     val proposals: List<RecropProposal>,
+    val qualityScore: PhotoQualityScore? = null,
     val capturedAtMs: Long = System.currentTimeMillis(),
 )
 
@@ -52,10 +55,24 @@ internal object PostShotRecrop {
         wasReady: Boolean,
         reason: String?,
         directorCue: DirectorCue?,
+        meanLuma: Int? = null,
+        zoomRatio: Float = 1f,
+        backgroundClutter: Double? = null,
+        unresolvedStep: Boolean = false,
     ): PostShotReview {
         val summary = reviewSummary(subjectBounds, rollDeg, wasReady, reason, directorCue)
         val proposals = generateProposals(subjectBounds)
-        return PostShotReview(photoUri, summary, proposals)
+        val quality = PhotoQualityEvaluator.evaluate(
+            subjectBounds = subjectBounds,
+            rollDeg = rollDeg,
+            wasReady = wasReady,
+            meanLuma = meanLuma,
+            zoomRatio = zoomRatio,
+            backgroundClutter = backgroundClutter,
+            unresolvedStep = unresolvedStep,
+            directorCue = directorCue,
+        )
+        return PostShotReview(photoUri, summary, proposals, qualityScore = quality)
     }
 
     internal fun reviewSummary(

@@ -20,10 +20,13 @@ import com.lumi.camera.camera.Extent
 import com.lumi.camera.camera.FrameGeometry
 import com.lumi.camera.camera.Point
 import com.lumi.camera.guidance.Observation
+import com.lumi.camera.guidance.ParallaxStepTracker
 import com.lumi.camera.guidance.RotationGuidance
+import com.lumi.camera.guidance.StepProgress
 import com.lumi.camera.guidance.SubjectPosition
 import com.lumi.camera.guidance.Uv
 import com.lumi.camera.shotplan.PendingRecommendationFrame
+import com.lumi.camera.shotplan.PhotoQualityEvaluator
 import com.lumi.camera.shotplan.RequestToken
 import com.lumi.camera.shotplan.SelectedSubject
 import com.lumi.camera.shotplan.SubjectCandidate
@@ -45,6 +48,8 @@ internal data class SceneFrame(
     val faces: List<FaceBox> = emptyList(),
     val meanLuma: Int? = null,
     val trackedFaces: List<TrackedFace> = emptyList(),
+    val stepProgress: StepProgress? = null,
+    val backgroundClutter: Double? = null,
 )
 
 internal class CompositionAnalyzer(
@@ -74,6 +79,7 @@ internal class CompositionAnalyzer(
     @Volatile var watchPerson = false
     @Volatile var proactiveMonitor = false
     @Volatile var tracker: SubjectTracker? = null
+    @Volatile var stepTracker: ParallaxStepTracker? = null
     @Volatile var expectedZoom = 1f
     private var lastProactiveFaceCheckNs = 0L
 
@@ -171,6 +177,9 @@ internal class CompositionAnalyzer(
                     }
                     val observation = Observation(captured, pose, lens, detected)
                     val shift = if (activeTracker != null && pixels != null) activeTracker.track(observation, pixels) else null
+                    val activeStep = stepTracker
+                    val stepProgress = if (activeStep != null) activeStep.update(observation, pixels, shift) else null
+                    val clutter = if (pixels != null) PhotoQualityEvaluator.estimateBackgroundClutter(pixels, primaryBox) else null
                     SceneFrame(
                         sequence = ts,
                         capturedNs = captured,
@@ -183,6 +192,8 @@ internal class CompositionAnalyzer(
                         faces = faceBoxes,
                         meanLuma = meanLuma,
                         trackedFaces = faceEntries.map { (id, b) -> TrackedFace(id, b) },
+                        stepProgress = stepProgress,
+                        backgroundClutter = clutter,
                     )
                 }
             } catch (e: Exception) {

@@ -35,11 +35,14 @@ import com.lumi.camera.BuildConfig
 import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.guidance.Lens
 import com.lumi.camera.guidance.Observation
+import com.lumi.camera.guidance.ParallaxStepTracker
 import com.lumi.camera.guidance.PoseGuide
 import com.lumi.camera.guidance.PoseGuidance
 import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
+import com.lumi.camera.guidance.StepProgress
 import com.lumi.camera.guidance.Uv
+import com.lumi.camera.shotplan.AestheticPreferenceStore
 import com.lumi.camera.shotplan.CompositionChoice
 import com.lumi.camera.shotplan.CompositionDiagnostic
 import com.lumi.camera.shotplan.CompositionPreset
@@ -97,6 +100,7 @@ internal data class Viewfinder(
     val tapPoint: Point? = null,
     val viewpointDrifted: Boolean = false,
     val directorCue: DirectorCue? = null,
+    val stepProgress: StepProgress? = null,
 )
 
 internal data class ViewfinderZoom(val ratio: Float = 1f, val min: Float = 1f, val max: Float = 1f,
@@ -161,6 +165,7 @@ internal class CameraSession(
     private var presetSelection = PresetSelection()
     private var proactivityMode = initialProactivity
     private val proactiveTrigger = ProactiveTrigger()
+    private val aestheticPrefs = AestheticPreferenceStore(context)
     private var lastReadyState = false
     private var selection: Selection? = null
     private var run: Run? = null
@@ -171,6 +176,7 @@ internal class CameraSession(
     private var latestLens: Lens? = null
     private var latestLensZoom = 1f
     private var latestShift: TrackedShift? = null
+    private var latestStepProgress: StepProgress? = null
     private var trackerLostSinceNs: Long? = null
     private var subjectLostNotified = false
     private var poses: CameraPose? = null
@@ -338,10 +344,11 @@ internal class CameraSession(
             run = null
             selection = null
             latestShift = null
+            latestStepProgress = null
             trackerLostSinceNs = null
             subjectLostNotified = false
             onRecommendationStatus(null)
-            observer?.apply { watchPerson = false; tracker = null }
+            observer?.apply { watchPerson = false; tracker = null; stepTracker = null }
         }
         if (age !in 0..RotationGuidance.FRESH_NS) {
             expire.run()
@@ -393,6 +400,9 @@ internal class CameraSession(
             } else if (trackerLostSinceNs == null) {
                 trackerLostSinceNs = now
             }
+        }
+        if (active?.target?.stepDirection != null && frame.stepProgress != null) {
+            latestStepProgress = frame.stepProgress
         }
         render()
         if (proactivityMode == ProactivityMode.PROACTIVE &&
@@ -523,6 +533,7 @@ internal class CameraSession(
             tapPoint = pendingTapPreview,
             viewpointDrifted = viewpointDrifted,
             directorCue = active?.target?.directorCue,
+            stepProgress = if (active?.target?.stepDirection != null) latestStepProgress else null,
         ))
     }
 
@@ -560,8 +571,22 @@ internal class CameraSession(
                 active.subjectName?.let { "$it·$label" } ?: label
             }
             active.guidance.resetHold()
+            if (preset != CompositionPreset.AUTO) {
+                aestheticPrefs.recordComposition(updated.choice, zoom.ratio)
+            }
             render()
         }
+    }
+
+    fun recordRecropPreference(proposalId: String) {
+        aestheticPrefs.recordRecrop(proposalId)
+    }
+
+    fun preferenceSummary(): String = aestheticPrefs.read().summaryLabel()
+
+    fun resetPreferences() {
+        aestheticPrefs.clear()
+        onMessage("已重置本地构图偏好记忆")
     }
 
     fun rememberComposition() {
@@ -581,9 +606,10 @@ internal class CameraSession(
         onRecommendationStatus(null)
         selection = null
         latestShift = null
+        latestStepProgress = null
         trackerLostSinceNs = null
         subjectLostNotified = false
-        observer?.tracker = null
+        observer?.apply { tracker = null; stepTracker = null }
         startGuide(target)
     }
 
@@ -594,9 +620,10 @@ internal class CameraSession(
         run = null
         selection = null
         latestShift = null
+        latestStepProgress = null
         trackerLostSinceNs = null
         subjectLostNotified = false
-        observer?.apply { watchPerson = false; tracker = null }
+        observer?.apply { watchPerson = false; tracker = null; stepTracker = null }
         onRecommendationStatus(null)
         onFrame(Viewfinder(canRemember = latest?.observation != null))
     }
@@ -622,10 +649,11 @@ internal class CameraSession(
             run = null
             selection = null
             latestShift = null
+            latestStepProgress = null
             trackerLostSinceNs = null
             subjectLostNotified = false
             lastReadyState = false
-            observer?.apply { watchPerson = false; tracker = null }
+            observer?.apply { watchPerson = false; tracker = null; stepTracker = null }
             onRecommendationStatus(null)
             render()
         }
@@ -675,11 +703,12 @@ internal class CameraSession(
         run = null
         selection = null
         latestShift = null
+        latestStepProgress = null
         trackerLostSinceNs = null
         subjectLostNotified = false
         lastReadyState = false
         pendingTapPreview = tapPreview
-        observer?.apply { watchPerson = false; tracker = null }
+        observer?.apply { watchPerson = false; tracker = null; stepTracker = null }
         render()
         val token = requests.begin(now, tapUv)
         observer?.pendingFrame?.await(token)
@@ -711,6 +740,7 @@ internal class CameraSession(
         val capturedPreset = presetSelection.preset
         val candidates = sample.candidates
         val userTapped = sample.tapUv != null
+        val preferencePrior = aestheticPrefs.read().promptPrior()
         onRecommendationStatus(
             when {
                 userTapped -> "正在围绕所选主体构图…"
@@ -730,7 +760,7 @@ internal class CameraSession(
                 val jpeg = sample.use { task.remainingMs(); it.jpeg() }
                 if (BuildConfig.DEBUG) sentJpeg = jpeg
                 sentNs = SystemClock.elapsedRealtimeNanos()
-                Result.success(task.send(jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom))
+                Result.success(task.send(jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom, preferencePrior))
             } catch (e: Exception) { Result.failure(e) }
             val times = RequestTimes(token.config, token.startedNs, sentNs ?: now, SystemClock.elapsedRealtimeNanos())
             main.execute select@{
@@ -811,6 +841,14 @@ internal class CameraSession(
         val baseTarget = when (val decision = RememberedComposition.recommended(source, plan, outline, capturedZoom)) {
             is PlanResult.Accepted -> decision.value
             is PlanResult.Rejected -> return reject(decision.problem)
+        }
+        val stepDir = plan.stepDirection
+        if (stepDir != null && outline != null && source.pixels != null) {
+            observer?.stepTracker = ParallaxStepTracker.from(stepDir, outline, source.pixels)
+            latestStepProgress = StepProgress(stepDir, 0f, satisfied = false)
+        } else {
+            observer?.stepTracker = null
+            latestStepProgress = null
         }
         // Automatically lock AF/AE focus and metering onto the chosen subject.
         val size = binding?.size
@@ -961,6 +999,11 @@ internal class CameraSession(
         val captureReady = lastReadyState
         val captureReason = run?.reason ?: selection?.name
         val captureCue = run?.target?.directorCue
+        val captureChoice = run?.target?.choice
+        val captureZoom = zoom.ratio
+        val captureLuma = latest?.meanLuma
+        val captureClutter = latest?.backgroundClutter
+        val captureUnresolvedStep = run?.target?.stepDirection != null && latestStepProgress?.satisfied != true
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "Lumi_${System.currentTimeMillis()}.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -979,6 +1022,7 @@ internal class CameraSession(
             override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                 if (disposed) return
                 proactiveTrigger.onManualOrCaptured(SystemClock.elapsedRealtimeNanos(), capturePose)
+                aestheticPrefs.recordComposition(captureChoice, captureZoom)
                 val uri = result.savedUri
                 if (uri != null) {
                     val review = PostShotRecrop.buildReview(
@@ -988,6 +1032,10 @@ internal class CameraSession(
                         wasReady = captureReady,
                         reason = captureReason,
                         directorCue = captureCue,
+                        meanLuma = captureLuma,
+                        zoomRatio = captureZoom,
+                        backgroundClutter = captureClutter,
+                        unresolvedStep = captureUnresolvedStep,
                     )
                     onCaptured(review)
                 } else {
@@ -1019,6 +1067,7 @@ internal class CameraSession(
         latestLens = null
         latestLensZoom = 1f
         latestShift = null
+        latestStepProgress = null
         trackerLostSinceNs = null
         subjectLostNotified = false
         lastReadyState = false

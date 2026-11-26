@@ -29,6 +29,7 @@ internal object ChatProtocol {
         candidates: List<SubjectCandidate> = emptyList(),
         zoomStops: List<Float> = emptyList(),
         currentZoom: Float = 1f,
+        preferencePrior: String? = null,
     ): String {
         val zoomHint = if (zoomStops.size >= 2) {
             val stopsText = zoomStops.joinToString("/") { String.format(Locale.ROOT, "%.1f", it).removeSuffix(".0") }
@@ -56,11 +57,14 @@ internal object ChatProtocol {
                 append("choice 必选其一：keep(保持现状)、center(居中平衡)、left_third(放左三分右侧留白)、right_third(放右三分左侧留白)、tight_top(减少顶部多余留白)、more_headroom(增加顶部留白)、pull_in(拉回安全区)。")
                 append("若主体明显偏左/偏右或周边杂乱，优先选 center、left_third 或 right_third；仅在水平位置已较协调且仅顶部空间失衡时才选 tight_top 或 more_headroom。")
                 append("再按问题严重度选最值钱的 1 个执导维度 focus(framing/background/lighting/pose)，用 12 字以内零术语口语写一条 tip（如避开背景杂物、借侧光、微调姿势）；若仅需转动构图可省略 focus 和 tip。")
+                append("仅当原地转动无法避开背后柱子/路人/遮挡物或需改变拍摄距离时，可加 \"step\":\"left\"|\"right\"|\"closer\"|\"back\"，否则省略。")
                 if (zoomHint.isNotEmpty()) append(zoomHint)
+                if (!preferencePrior.isNullOrBlank()) append(preferencePrior)
                 append("reason 十字以内写画面效果，不写左右上下移动指令。")
             }
         } else {
-            if (zoomHint.isEmpty()) prompt else "$prompt\n$zoomHint"
+            val withZoom = if (zoomHint.isEmpty()) prompt else "$prompt\n$zoomHint"
+            if (preferencePrior.isNullOrBlank()) withZoom else "$withZoom\n$preferencePrior"
         }
         val hint = preset.promptHint ?: return base
         return "$base\n$hint"
@@ -73,10 +77,11 @@ internal object ChatProtocol {
         candidates: List<SubjectCandidate> = emptyList(),
         zoomStops: List<Float> = emptyList(),
         currentZoom: Float = 1f,
+        preferencePrior: String? = null,
     ): ByteArray {
         val url = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
         val content = JSONArray()
-            .put(JSONObject().put("type", "text").put("text", promptFor(preset, candidates, zoomStops, currentZoom)))
+            .put(JSONObject().put("type", "text").put("text", promptFor(preset, candidates, zoomStops, currentZoom, preferencePrior)))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", url)))
         val messages = JSONArray().put(JSONObject().put("role", "user").put("content", content))
         val body = JSONObject().put("model", model).put("messages", messages).put("stream", false)

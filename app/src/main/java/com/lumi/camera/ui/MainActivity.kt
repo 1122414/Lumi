@@ -66,6 +66,7 @@ import com.lumi.camera.camera.ViewfinderZoom
 import com.lumi.camera.camera.Point
 import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.guidance.PoseGuidance
+import com.lumi.camera.guidance.StepProgress
 import com.lumi.camera.shotplan.CompositionChoice
 import com.lumi.camera.shotplan.CompositionDiagnostic
 import com.lumi.camera.shotplan.CompositionPreset
@@ -74,6 +75,7 @@ import com.lumi.camera.shotplan.DirectorCategory
 import com.lumi.camera.shotplan.DirectorCue
 import com.lumi.camera.shotplan.ModelConfig
 import com.lumi.camera.shotplan.ModelConfigStore
+import com.lumi.camera.shotplan.PhotoQualityScore
 import com.lumi.camera.shotplan.PresetSelection
 import com.lumi.camera.shotplan.ProactivityMode
 import com.lumi.camera.shotplan.SavedDiagnostic
@@ -224,8 +226,8 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
         if (!frame.ready) autoShotFired = false
     }
 
-    LaunchedEffect(frame.ready, autoShoot, autoShotFired, frame.suggestedZoom) {
-        if (!autoShoot || !frame.ready || autoShotFired || frame.suggestedZoom != null) {
+    LaunchedEffect(frame.ready, autoShoot, autoShotFired, frame.suggestedZoom, frame.stepProgress?.satisfied) {
+        if (!autoShoot || !frame.ready || autoShotFired || frame.suggestedZoom != null || frame.stepProgress?.satisfied == false) {
             autoShootProgress = 0f
             return@LaunchedEffect
         }
@@ -340,6 +342,9 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                     }
                     frame.directorCue?.let { cue ->
                         DirectorCuePill(cue)
+                    }
+                    frame.stepProgress?.let { step ->
+                        StepProgressPill(step)
                     }
                 }
                 val bannerReview = lastReview
@@ -473,9 +478,12 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                 frame.reason?.let { Text(it, color = Color.White, fontSize = 15.sp, maxLines = 1) }
                 val rollWarn = frame.rollDeg?.let { abs(it) > PoseGuidance.READY_MAX_ROLL_DEG } == true
                 val pendingSuggestedZoom = frame.suggestedZoom
+                val pendingStep = frame.stepProgress?.takeIf { !it.satisfied }
                 Text(when {
                     frame.ready && pendingSuggestedZoom != null ->
                         "已对齐 · 建议切至 ${SubjectCandidates.formatZoomLabel(pendingSuggestedZoom)}（或手动拍）"
+                    frame.ready && pendingStep != null ->
+                        "构图已对齐 · ${pendingStep.direction.arrow} ${pendingStep.direction.label}更干净"
                     frame.ready && autoShoot && !autoShotFired -> "停稳自动拍摄中…"
                     frame.ready -> "可以拍"
                     !bound -> if (lens.front) "正在打开前置相机" else "正在打开后置相机"
@@ -526,8 +534,13 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     if (reviewDialogOpen && activeReview != null) {
         PostShotReviewDialog(
             review = activeReview,
+            preferenceSummary = session.preferenceSummary(),
             onDismiss = { reviewDialogOpen = false },
-            onSavedCopy = { msg -> onMessage(msg) },
+            onSavedCopy = { proposalId, msg ->
+                session.recordRecropPreference(proposalId)
+                onMessage(msg)
+            },
+            onResetPreferences = session::resetPreferences,
         )
     }
 }
@@ -805,10 +818,114 @@ private fun LastPhotoThumb(review: PostShotReview, onClick: () -> Unit) {
 }
 
 @Composable
+private fun StepProgressPill(step: StepProgress) {
+    val accent = if (step.satisfied) Color(0xFF38DF85) else Color(0xFF4FC3F7)
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xC7111A1E),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.80f)),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = if (step.satisfied) "✓ 机位已到位" else "${step.direction.arrow} ${step.direction.label}",
+                color = accent,
+                fontSize = 12.sp,
+                maxLines = 1,
+            )
+            Box(
+                Modifier
+                    .width(96.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color(0x33FFFFFF)),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(step.progress.coerceIn(0.08f, 1f))
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(accent),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QualityScoreCard(score: PhotoQualityScore) {
+    val gradeColor = when (score.grade) {
+        "S" -> Color(0xFF38DF85)
+        "A" -> Color(0xFFB3DBBE)
+        "B" -> Color(0xFFFFD54F)
+        else -> Color(0xFFFFAB91)
+    }
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0x1FFFFFFF),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("成片四维评估", color = Color.White, fontSize = 13.sp)
+                Text(
+                    text = "${score.overall} 分 · ${score.grade} 级（待提升：${score.weakestDimension}）",
+                    color = gradeColor,
+                    fontSize = 12.sp,
+                )
+            }
+            val dims = listOf(
+                "主体突出" to score.subjectClarity,
+                "画面平衡" to score.frameBalance,
+                "背景干净" to score.backgroundCleanliness,
+                "自然度" to score.naturalness,
+            )
+            dims.forEach { (label, value) ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(label, color = Color(0xFFB8C5BE), fontSize = 11.sp, modifier = Modifier.width(52.dp))
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(Color(0x28FFFFFF)),
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth((value / 100f).coerceIn(0.05f, 1f))
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(if (value >= 80) Color(0xFF38DF85) else Color(0xFFFFD54F)),
+                        )
+                    }
+                    Text("$value", color = Color.White, fontSize = 11.sp, modifier = Modifier.width(24.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PostShotReviewDialog(
     review: PostShotReview,
+    preferenceSummary: String,
     onDismiss: () -> Unit,
-    onSavedCopy: (String) -> Unit,
+    onSavedCopy: (String, String) -> Unit,
+    onResetPreferences: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -817,6 +934,7 @@ private fun PostShotReviewDialog(
     }
     var selectedProposalId by remember(review.photoUri) { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
+    var prefText by remember(preferenceSummary) { mutableStateOf(preferenceSummary) }
     val activeProposal = review.proposals.firstOrNull { it.id == selectedProposalId }
     val activeCrop: NormalizedCrop? = activeProposal?.crop
 
@@ -831,6 +949,7 @@ private fun PostShotReviewDialog(
             ) {
                 Text("拍后轻复盘 · 二次构图", style = MaterialTheme.typography.titleMedium)
                 Text(review.summary, fontSize = 13.sp, color = Color(0xFFD5E0DA))
+                review.qualityScore?.let { QualityScoreCard(it) }
                 val bmp = previewBitmap
                 if (bmp != null) {
                     val displayBmp = remember(bmp, activeCrop) {
@@ -895,6 +1014,29 @@ private fun PostShotReviewDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    Text(
+                        text = prefText,
+                        color = Color(0xFF9EB0A6),
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = {
+                            onResetPreferences()
+                            prefText = "正在学习你的拍摄偏好（已记录 0 次）"
+                        },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    ) {
+                        Text("重置偏好", fontSize = 11.sp)
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     TextButton(onClick = onDismiss, enabled = !saving) { Text("关闭") }
                     if (activeProposal != null) {
                         Button(
@@ -912,8 +1054,9 @@ private fun PostShotReviewDialog(
                                     }
                                     saving = false
                                     onSavedCopy(
+                                        activeProposal.id,
                                         if (saved != null) "已保存「${activeProposal.title}」副本（原图已保留）"
-                                        else "保存裁切副本失败，请检查存储权限。"
+                                        else "保存裁切副本失败，请检查存储权限。",
                                     )
                                     if (saved != null) onDismiss()
                                 }

@@ -33,9 +33,10 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
         candidates: List<SubjectCandidate> = emptyList(),
         zoomStops: List<Float> = emptyList(),
         currentZoom: Float = 1f,
+        preferencePrior: String? = null,
     ): ModelReply {
         remainingMs()
-        val payload = ChatProtocol.request(config.model, jpeg, preset, candidates, zoomStops, currentZoom)
+        val payload = ChatProtocol.request(config.model, jpeg, preset, candidates, zoomStops, currentZoom, preferencePrior)
         val url = checkNotNull(chatEndpoint(config.address, BuildConfig.DEBUG))
         val conn = (if (url.protocol == "http") url.openConnection(Proxy.NO_PROXY) else url.openConnection()) as HttpURLConnection
         connection.set(conn)
