@@ -227,13 +227,15 @@ internal class SubjectOutline private constructor(private val source: Observatio
                 var mask = baseMask
                 val mb = mask.bounds
                 if (bh > 0.12 && (mb.bottom - mb.top) < bh * 0.68) {
-                    val probeY = if ((mb.top - box.top) > (box.bottom - mb.bottom)) {
-                        (box.top + mb.top) / 2.0
-                    } else {
-                        (mb.bottom + box.bottom) / 2.0
+                    val missedTop = (mb.top - box.top) > (box.bottom - mb.bottom)
+                    // For portraits, only probe upward (e.g. missed head/hair); never probe downward into tables or trays.
+                    val probeY = when {
+                        missedTop -> (box.top + mb.top) / 2.0
+                        !selected.person -> (mb.bottom + box.bottom) / 2.0
+                        else -> null
                     }
-                    val probe = Uv((box.left + box.right) / 2.0, probeY)
-                    if (selected.contains(probe) && !mask.contains(probe)) {
+                    val probe = probeY?.let { Uv((box.left + box.right) / 2.0, it) }
+                    if (probe != null && selected.contains(probe) && !mask.contains(probe)) {
                         val extraRaw = within(image, probe, box, segment)
                         val extra = extraRaw?.constrained(selected.outline, probe, minRetention = 0.35)
                         if (extra != null) {

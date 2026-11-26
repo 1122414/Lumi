@@ -34,10 +34,10 @@ internal object SubjectCandidates {
         val w = (face.right - face.left).coerceAtLeast(0.02)
         val h = (face.bottom - face.top).coerceAtLeast(0.02)
         return FaceBox(
-            left = (face.left - 0.55 * w).coerceIn(0.01, 0.98),
+            left = (face.left - 0.48 * w).coerceIn(0.01, 0.98),
             top = (face.top - 0.35 * h).coerceIn(0.01, 0.98),
-            right = (face.right + 0.55 * w).coerceIn(0.02, 0.99),
-            bottom = (face.bottom + 2.30 * h).coerceIn(0.02, 0.99),
+            right = (face.right + 0.48 * w).coerceIn(0.02, 0.99),
+            bottom = (face.bottom + 1.85 * h).coerceIn(0.02, 0.99),
         )
     }
 

@@ -140,6 +140,52 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
     companion object {
         const val MAX_VIEWPOINT_PITCH_DRIFT_DEG = 12.0
         const val MAX_PARALLAX_SHIFT = 0.35
+        const val SINGLE_FACE_NO_ID = -1
+        const val GROUP_FACE_ID = -2
+
+        // Match only the locked person's face (never the union of unrelated background diners).
+        fun matchLiveFace(
+            anchor: com.lumi.camera.guidance.SubjectPosition,
+            predicted: Uv,
+            trackedFaces: List<com.lumi.camera.vision.TrackedFace>,
+            lensScale: Double = 1.0,
+        ): Uv? {
+            if (trackedFaces.isEmpty()) return null
+            val scale = lensScale.coerceAtLeast(0.5)
+            val expectedW = (anchor.width * scale).coerceAtLeast(0.02)
+            fun faceCenter(b: com.lumi.camera.vision.FaceBox) = Uv((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0)
+
+            if (anchor.id == GROUP_FACE_ID) {
+                val maxGroupDist = (0.30 * scale).coerceAtMost(0.55)
+                val nearby = trackedFaces.filter { tf ->
+                    val c = faceCenter(tf.box)
+                    kotlin.math.hypot(c.x - predicted.x, c.y - predicted.y) <= maxGroupDist
+                }.map { it.box }
+                if (nearby.size < 2) return null
+                val u = SubjectCandidates.unionOf(nearby) ?: return null
+                return faceCenter(u)
+            }
+
+            if (anchor.id >= 0) {
+                val byId = trackedFaces.firstOrNull { it.id == anchor.id }
+                if (byId != null) {
+                    val c = faceCenter(byId.box)
+                    val w = (byId.box.right - byId.box.left).coerceAtLeast(0.01)
+                    val dist = kotlin.math.hypot(c.x - predicted.x, c.y - predicted.y)
+                    val ratio = w / expectedW
+                    if (dist <= 0.25 * scale && ratio in 0.45..2.2) return c
+                }
+            }
+
+            val maxDist = (0.16 * scale).coerceAtMost(0.32)
+            return trackedFaces.mapNotNull { tf ->
+                val c = faceCenter(tf.box)
+                val w = (tf.box.right - tf.box.left).coerceAtLeast(0.01)
+                val ratio = w / expectedW
+                val dist = kotlin.math.hypot(c.x - predicted.x, c.y - predicted.y)
+                if (dist <= maxDist && ratio in 0.50..2.0) c to dist else null
+            }.minByOrNull { it.second }?.first
+        }
 
         fun from(frame: SceneFrame): RememberedComposition? {
             val observation = frame.observation ?: return null
@@ -164,18 +210,41 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
             val selected = recommendation.subject
             val outline = selectedOutline ?: return PlanResult.Rejected(PlanProblem.UNCONFIRMED_OUTLINE)
             val matchedFace = if (selected.person) {
-                observation.subject?.takeIf { outline.containsAtCapture(it.center) }
-                    ?: frame.faces.firstOrNull { f ->
-                        val c = Uv((f.left + f.right) / 2.0, (f.top + f.bottom) / 2.0)
-                        outline.containsAtCapture(c)
-                    }?.let { f ->
+                val candidatesInFrame = if (frame.trackedFaces.isNotEmpty()) {
+                    frame.trackedFaces
+                } else {
+                    frame.faces.map { com.lumi.camera.vision.TrackedFace(null, it) }
+                }
+                val insideOutline = candidatesInFrame.filter { tf ->
+                    val c = Uv((tf.box.left + tf.box.right) / 2.0, (tf.box.top + tf.box.bottom) / 2.0)
+                    outline.containsAtCapture(c)
+                }
+                val insideSelection = if (insideOutline.isNotEmpty()) insideOutline else candidatesInFrame.filter { tf ->
+                    val c = Uv((tf.box.left + tf.box.right) / 2.0, (tf.box.top + tf.box.bottom) / 2.0)
+                    selected.contains(c)
+                }
+                when {
+                    insideSelection.size == 1 -> {
+                        val tf = insideSelection.first()
                         com.lumi.camera.guidance.SubjectPosition(
-                            id = 0,
-                            center = Uv((f.left + f.right) / 2.0, (f.top + f.bottom) / 2.0),
-                            width = f.right - f.left,
+                            id = tf.id ?: SINGLE_FACE_NO_ID,
+                            center = Uv((tf.box.left + tf.box.right) / 2.0, (tf.box.top + tf.box.bottom) / 2.0),
+                            width = (tf.box.right - tf.box.left).coerceAtLeast(0.01),
                         )
                     }
-                    ?: if (recommendation.candidateId != null || frame.faces.size >= 2) outline.sourceSubject else null
+                    insideSelection.size >= 2 -> {
+                        val u = SubjectCandidates.unionOf(insideSelection.map { it.box })
+                        u?.let {
+                            com.lumi.camera.guidance.SubjectPosition(
+                                id = GROUP_FACE_ID,
+                                center = Uv((it.left + it.right) / 2.0, (it.top + it.bottom) / 2.0),
+                                width = (it.right - it.left).coerceAtLeast(0.01),
+                            )
+                        }
+                    }
+                    candidatesInFrame.isEmpty() -> observation.subject?.takeIf { outline.containsAtCapture(it.center) }
+                    else -> null
+                } ?: if (recommendation.candidateId != null || frame.faces.size >= 2) outline.sourceSubject else null
             } else outline.sourceSubject
             if (matchedFace == null) return PlanResult.Rejected(PlanProblem.UNCONFIRMED_FACE)
             val source = observation.copy(subject = matchedFace)

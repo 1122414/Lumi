@@ -30,6 +30,7 @@ import com.lumi.camera.shotplan.SubjectCandidate
 import com.lumi.camera.shotplan.SubjectCandidates
 
 internal data class FaceBox(val left: Double, val top: Double, val right: Double, val bottom: Double)
+internal data class TrackedFace(val id: Int?, val box: FaceBox)
 internal data class SceneFrame(
     val sequence: Long,
     val capturedNs: Long,
@@ -43,6 +44,7 @@ internal data class SceneFrame(
     val shift: TrackedShift? = null,
     val faces: List<FaceBox> = emptyList(),
     val meanLuma: Int? = null,
+    val trackedFaces: List<TrackedFace> = emptyList(),
 )
 
 internal class CompositionAnalyzer(
@@ -180,6 +182,7 @@ internal class CompositionAnalyzer(
                         shift = shift,
                         faces = faceBoxes,
                         meanLuma = meanLuma,
+                        trackedFaces = faceEntries.map { (id, b) -> TrackedFace(id, b) },
                     )
                 }
             } catch (e: Exception) {

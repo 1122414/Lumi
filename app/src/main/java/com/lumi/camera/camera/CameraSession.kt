@@ -352,28 +352,31 @@ internal class CameraSession(
         var faceTracked = false
         if (active?.target?.outline?.person == true && obs != null) {
             val anchorFace = active.target.backgroundSource.subject
-            val liveFace = obs.subject
-            if (anchorFace != null && liveFace != null) {
+            if (anchorFace != null) {
                 val predicted = RotationProjection(active.target.backgroundSource, obs).project(anchorFace.center)
                 if (predicted != null) {
-                    val rawDx = liveFace.center.x - predicted.x
-                    val rawDy = liveFace.center.y - predicted.y
-                    val prev = latestShift
-                    val dx = if (prev != null) {
-                        val initDx = prev.dx * (obs.lens.fx / prev.lens.fx)
-                        initDx + 0.55 * (rawDx - initDx)
-                    } else rawDx
-                    val dy = if (prev != null) {
-                        val initDy = prev.dy * (obs.lens.fy / prev.lens.fy)
-                        initDy + 0.55 * (rawDy - initDy)
-                    } else rawDy
-                    latestShift = TrackedShift(dx, dy, obs.lens, obs.timeNs, matched = true)
-                    trackerLostSinceNs = null
-                    if (subjectLostNotified) {
-                        subjectLostNotified = false
-                        onRecommendationStatus(null)
+                    val lensScale = obs.lens.fx / active.target.backgroundSource.lens.fx
+                    val liveCenter = RememberedComposition.matchLiveFace(anchorFace, predicted, frame.trackedFaces, lensScale)
+                    if (liveCenter != null) {
+                        val rawDx = liveCenter.x - predicted.x
+                        val rawDy = liveCenter.y - predicted.y
+                        val prev = latestShift
+                        val dx = if (prev != null) {
+                            val initDx = prev.dx * (obs.lens.fx / prev.lens.fx)
+                            initDx + 0.55 * (rawDx - initDx)
+                        } else rawDx
+                        val dy = if (prev != null) {
+                            val initDy = prev.dy * (obs.lens.fy / prev.lens.fy)
+                            initDy + 0.55 * (rawDy - initDy)
+                        } else rawDy
+                        latestShift = TrackedShift(dx, dy, obs.lens, obs.timeNs, matched = true)
+                        trackerLostSinceNs = null
+                        if (subjectLostNotified) {
+                            subjectLostNotified = false
+                            onRecommendationStatus(null)
+                        }
+                        faceTracked = true
                     }
-                    faceTracked = true
                 }
             }
         }

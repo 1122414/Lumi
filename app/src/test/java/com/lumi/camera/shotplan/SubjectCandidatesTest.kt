@@ -174,4 +174,49 @@ class SubjectCandidatesTest {
             pitchedDown.degreesTo(liveTarget.pose) > 15.0,
         )
     }
+
+    @Test fun singlePortraitTrackingIgnoresBackgroundDinersAndPreventsRunawayRing() {
+        val boyAnchor = com.lumi.camera.guidance.SubjectPosition(
+            id = 7,
+            center = Uv(0.635, 0.375),
+            width = 0.17,
+        )
+        // Panning right shifts predicted boy center left to ~0.48 while new right-side queue faces enter.
+        val predicted = Uv(0.48, 0.375)
+        val boyLive = com.lumi.camera.vision.TrackedFace(7, FaceBox(0.40, 0.30, 0.57, 0.45))
+        val leftDiner = com.lumi.camera.vision.TrackedFace(12, FaceBox(0.05, 0.31, 0.12, 0.40))
+        val rightQueue = com.lumi.camera.vision.TrackedFace(19, FaceBox(0.80, 0.29, 0.87, 0.38))
+
+        val matched = RememberedComposition.matchLiveFace(
+            anchor = boyAnchor,
+            predicted = predicted,
+            trackedFaces = listOf(leftDiner, boyLive, rightQueue),
+            lensScale = 1.0,
+        )
+        assertNotNull(matched)
+        // Must match boy's exact face (~0.485), NOT cafeteria union (~0.46 or shifting right with queue).
+        assertEquals(0.485, matched!!.x, 0.01)
+        assertEquals(0.375, matched.y, 0.01)
+
+        // If the boy temporarily turns away (id=7 disappears), must NOT hijack a tiny background face near predicted.
+        val tinyBgFace = com.lumi.camera.vision.TrackedFace(25, FaceBox(0.46, 0.34, 0.51, 0.40))
+        val noHijack = RememberedComposition.matchLiveFace(
+            anchor = boyAnchor,
+            predicted = predicted,
+            trackedFaces = listOf(tinyBgFace, rightQueue),
+            lensScale = 1.0,
+        )
+        assertNull("tiny background face (w=0.05 vs anchor w=0.17) must not hijack foreground portrait", noHijack)
+
+        // If ML Kit reassigns a new tracking ID to the boy himself (same size, right at predicted), still tracks smoothly.
+        val boyReId = com.lumi.camera.vision.TrackedFace(99, FaceBox(0.41, 0.30, 0.58, 0.45))
+        val recovered = RememberedComposition.matchLiveFace(
+            anchor = boyAnchor,
+            predicted = predicted,
+            trackedFaces = listOf(boyReId, rightQueue),
+            lensScale = 1.0,
+        )
+        assertNotNull(recovered)
+        assertEquals(0.495, recovered!!.x, 0.01)
+    }
 }
