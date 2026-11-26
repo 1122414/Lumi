@@ -8,8 +8,11 @@ import android.provider.Settings
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -180,6 +183,8 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
         mutableStateOf(ExposureControlMode.fromWire(uiPrefs.getString("exposure_mode", null)))
     }
     var exposureState by remember { mutableStateOf(ExposureUiState(mode = exposureMode)) }
+    var referenceState by remember { mutableStateOf(ReferenceUiState()) }
+    var referenceDialogOpen by remember { mutableStateOf(false) }
     var lastReview by remember { mutableStateOf<PostShotReview?>(null) }
     var reviewBannerVisible by remember { mutableStateOf(false) }
     var reviewDialogOpen by remember { mutableStateOf(false) }
@@ -207,8 +212,21 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                 exposureState = nextExp
                 exposureMode = nextExp.mode
             },
+            onReference = { nextRef ->
+                referenceState = nextRef
+            },
             initialProactivity = proactivityMode,
             initialExposureMode = exposureMode)
+    }
+    val pickReferenceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) session.loadReferenceImage(uri)
+    }
+    fun launchReferencePicker() {
+        pickReferenceLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
     }
     LaunchedEffect(lastReview?.capturedAtMs) {
         if (lastReview != null) {
@@ -269,6 +287,10 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
         Box(Modifier.fillMaxSize().padding(top = 48.dp, bottom = 160.dp), contentAlignment = Alignment.Center) {
             Box(Modifier.aspectRatio(3f / 4f).background(Color.Black)) {
                 AndroidView({ preview }, Modifier.matchParentSize())
+                ReferenceOverlayLayer(
+                    state = referenceState,
+                    modifier = Modifier.matchParentSize(),
+                )
                 Canvas(
                     Modifier
                         .matchParentSize()
@@ -331,7 +353,11 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                 Column(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .padding(top = 10.dp, start = 12.dp, end = 12.dp),
+                        .padding(
+                            top = 10.dp,
+                            start = 12.dp,
+                            end = if (referenceState.hasReference) 74.dp else 12.dp,
+                        ),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -356,10 +382,23 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                     frame.stepProgress?.let { step ->
                         StepProgressPill(step)
                     }
+                    frame.referenceGuidance?.let { refGuide ->
+                        ReferenceCoachBanner(refGuide)
+                    }
                     AiExposureActionPill(
                         state = exposureState,
                         onApplyPending = session::applyPendingAiExposure,
                         onRevertApplied = session::revertAiExposure,
+                    )
+                }
+                if (referenceState.hasReference) {
+                    ReferenceThumbnailDock(
+                        state = referenceState,
+                        onToggleOverlay = session::toggleReferenceOverlay,
+                        onOpenSheet = { referenceDialogOpen = true },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(end = 8.dp, top = 8.dp),
                     )
                 }
                 if (exposureState.mode == ExposureControlMode.AI_AUTO) {
@@ -573,18 +612,34 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                 }, color = Color.White, fontSize = 13.sp)
             }
             PresetPillBar(presetSelection, onSelect = session::selectPreset)
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 lastReview?.let { review ->
                     LastPhotoThumb(review = review, onClick = {
                         reviewBannerVisible = false
                         reviewDialogOpen = true
                     })
                 }
+                ReferencePickerChip(
+                    hasReference = referenceState.hasReference,
+                    overlayEnabled = referenceState.overlayEnabled,
+                    onClick = {
+                        if (referenceState.hasReference) {
+                            referenceDialogOpen = true
+                        } else {
+                            launchReferencePicker()
+                        }
+                    },
+                )
                 Button(
                     session::recommend,
                     enabled = bound && !zoom.changing && configured && proactivityMode != ProactivityMode.QUIET,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                 ) { Text("推荐构图") }
-                OutlinedButton(onShoot, enabled = bound && !zoom.changing) { Text("拍照并保存") }
+                OutlinedButton(
+                    onShoot,
+                    enabled = bound && !zoom.changing,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                ) { Text("拍照") }
                 if (lens.canSwitch) {
                     CameraFlipButton(
                         front = lens.front,
@@ -615,6 +670,18 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                 onMessage(msg)
             },
             onResetPreferences = session::resetPreferences,
+        )
+    }
+    if (referenceDialogOpen && referenceState.hasReference) {
+        ReferenceRecipeDialog(
+            state = referenceState,
+            modelConfigured = configured,
+            onDismiss = { referenceDialogOpen = false },
+            onToggleOverlay = session::toggleReferenceOverlay,
+            onAlphaChange = session::setReferenceOverlayAlpha,
+            onRetryAnalyze = session::retryReferenceAnalysis,
+            onReplaceImage = ::launchReferencePicker,
+            onClearReference = session::clearReferenceImage,
         )
     }
 }

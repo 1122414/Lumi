@@ -18,16 +18,16 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
     val choice: CompositionChoice? = null, val desiredSubjectCenter: Uv? = null,
     val originalChoice: CompositionChoice? = choice, val originalDesiredSubjectCenter: Uv? = desiredSubjectCenter,
     val suggestedZoom: Float? = null, val directorCue: DirectorCue? = null,
-    val stepDirection: StepDirection? = null) {
+    val stepDirection: StepDirection? = null, val referenceGuidance: ReferenceGuidance? = null) {
 
     fun withPreset(selection: PresetSelection, livePose: Pose, liveLens: Lens, shift: TrackedShift?): RememberedComposition {
         val trackedOutline = outline ?: return this
         if (selection.preset == CompositionPreset.AUTO) {
             val restored = RememberedComposition(geometry, observation, backgroundSource, marks, outline,
-                useOutlinePosition, originalChoice, originalDesiredSubjectCenter, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection)
+                useOutlinePosition, originalChoice, originalDesiredSubjectCenter, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance)
             val liveTarget = restored.targetFor(livePose, liveLens, shift)
             return RememberedComposition(geometry, liveTarget, backgroundSource, marks, outline,
-                useOutlinePosition, originalChoice, originalDesiredSubjectCenter, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection)
+                useOutlinePosition, originalChoice, originalDesiredSubjectCenter, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance)
         }
         val b0 = trackedOutline.bounds
         val w0 = (b0.right - b0.left).coerceIn(0.01, 1.0)
@@ -53,10 +53,10 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
             else -> Uv(c0.x - (captureAim.x - 0.5), c0.y - (captureAim.y - 0.5))
         }
         val updated = RememberedComposition(geometry, observation, backgroundSource, marks, outline,
-            useOutlinePosition, newChoice, newDesired0, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection)
+            useOutlinePosition, newChoice, newDesired0, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance)
         val liveTarget = updated.targetFor(livePose, liveLens, shift)
         return RememberedComposition(geometry, liveTarget, backgroundSource, marks, outline,
-            useOutlinePosition, newChoice, newDesired0, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection)
+            useOutlinePosition, newChoice, newDesired0, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance)
     }
 
     fun predictedSubjectCenter(livePose: Pose, liveLens: Lens, shift: TrackedShift?): Uv? {
@@ -273,7 +273,8 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
             return PlanResult.Accepted(RememberedComposition(frame.geometry, target, source, marks,
                 outline, useOutlinePosition = !selected.person, choice = effectivePlan.choice,
                 desiredSubjectCenter = desired0, suggestedZoom = effectivePlan.suggestedZoom,
-                directorCue = effectivePlan.directorCue, stepDirection = effectivePlan.stepDirection))
+                directorCue = effectivePlan.directorCue, stepDirection = effectivePlan.stepDirection,
+                referenceGuidance = effectivePlan.referenceGuidance))
         }
     }
 }

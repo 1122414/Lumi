@@ -36,9 +36,28 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
         preferencePrior: String? = null,
         telemetrySummary: String? = null,
         requestExposureAdvice: Boolean = false,
+        referenceRecipe: ReferenceRecipe? = null,
+        referenceJpeg: ByteArray? = null,
     ): ModelReply {
         remainingMs()
-        val payload = ChatProtocol.request(config.model, jpeg, preset, candidates, zoomStops, currentZoom, preferencePrior, telemetrySummary, requestExposureAdvice)
+        val payload = ChatProtocol.request(
+            config.model, jpeg, preset, candidates, zoomStops, currentZoom,
+            preferencePrior, telemetrySummary, requestExposureAdvice, referenceRecipe, referenceJpeg,
+        )
+        val body = postJson(payload)
+        return try { ChatProtocol.response(body, candidates, zoomStops, currentZoom) } catch (_: Exception) { null }
+            ?: throw ModelFailure(ConnectionResult.FORMAT, "模型未返回可识别的主体，请重新推荐。", rawReply = body.take(1500))
+    }
+
+    fun analyzeReference(referenceJpeg: ByteArray): ReferenceRecipe {
+        remainingMs()
+        val payload = ReferenceRecipeProtocol.request(config.model, referenceJpeg)
+        val body = postJson(payload)
+        return try { ReferenceRecipeProtocol.response(body) } catch (_: Exception) { null }
+            ?: throw ModelFailure(ConnectionResult.FORMAT, "参考图未能解析出拍摄处方，可直接用半透明叠图参考。", rawReply = body.take(1500))
+    }
+
+    private fun postJson(payload: ByteArray): String {
         val url = checkNotNull(chatEndpoint(config.address, BuildConfig.DEBUG))
         val conn = (if (url.protocol == "http") url.openConnection(Proxy.NO_PROXY) else url.openConnection()) as HttpURLConnection
         connection.set(conn)
@@ -75,8 +94,7 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
             }
             // Fully reading and closing inputStream lets Android's HttpURLConnection pool reuse the TLS socket.
             keepAlive = !cancelled
-            return try { ChatProtocol.response(body, candidates, zoomStops, currentZoom) } catch (_: Exception) { null }
-                ?: throw ModelFailure(ConnectionResult.FORMAT, "模型未返回可识别的主体，请重新推荐。", rawReply = body.take(1500))
+            return body
         } finally {
             connection.compareAndSet(conn, null)
             if (!keepAlive) conn.disconnect()

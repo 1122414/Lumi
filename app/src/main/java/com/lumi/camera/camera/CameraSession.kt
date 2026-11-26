@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.hardware.camera2.CaptureRequest
 import android.hardware.display.DisplayManager
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -62,11 +63,14 @@ import com.lumi.camera.shotplan.PresetSelection
 import com.lumi.camera.shotplan.ProactiveTrigger
 import com.lumi.camera.shotplan.ProactivityMode
 import com.lumi.camera.shotplan.RecommendationRequests
+import com.lumi.camera.shotplan.ReferenceGuidance
+import com.lumi.camera.shotplan.ReferenceImageLoader
 import com.lumi.camera.shotplan.RememberedComposition
 import com.lumi.camera.shotplan.RequestToken
 import com.lumi.camera.shotplan.SubjectCandidate
 import com.lumi.camera.shotplan.VisionChat
 import com.lumi.camera.ui.ExposureUiState
+import com.lumi.camera.ui.ReferenceUiState
 import com.lumi.camera.vision.CompositionAnalyzer
 import com.lumi.camera.vision.OutlineAttempt
 import com.lumi.camera.vision.PostShotRecrop
@@ -106,6 +110,7 @@ internal data class Viewfinder(
     val viewpointDrifted: Boolean = false,
     val directorCue: DirectorCue? = null,
     val stepProgress: StepProgress? = null,
+    val referenceGuidance: ReferenceGuidance? = null,
 )
 
 internal data class ViewfinderZoom(val ratio: Float = 1f, val min: Float = 1f, val max: Float = 1f,
@@ -127,6 +132,7 @@ internal class CameraSession(
     private val onPreset: (PresetSelection) -> Unit = {},
     private val onCaptured: (PostShotReview) -> Unit = {},
     private val onExposure: (ExposureUiState) -> Unit = {},
+    private val onReference: (ReferenceUiState) -> Unit = {},
     initialProactivity: ProactivityMode = ProactivityMode.MANUAL,
     initialExposureMode: ExposureControlMode = ExposureControlMode.AUTO,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
@@ -195,6 +201,11 @@ internal class CameraSession(
     private var appliedAiExposure: AiExposureSuggestion? = null
     private var latestAiExposure: AiExposureSuggestion? = null
     private var lastTelemetryPushNs = 0L
+    private var referenceState = ReferenceUiState()
+    private var referenceAnalysisJpeg: ByteArray? = null
+    private var referenceCompareJpeg: ByteArray? = null
+    private var referenceGeneration = 0
+    private var referenceCall: VisionChat? = null
     private var observer: CompositionAnalyzer? = null
     private var provider: ProcessCameraProvider? = null
     private var binding: Binding? = null
@@ -560,6 +571,7 @@ internal class CameraSession(
             viewpointDrifted = viewpointDrifted,
             directorCue = active?.target?.directorCue,
             stepProgress = if (active?.target?.stepDirection != null) latestStepProgress else null,
+            referenceGuidance = active?.target?.referenceGuidance,
         ))
     }
 
@@ -785,6 +797,115 @@ internal class CameraSession(
         onMessage("已将 AI 建议填入 M 手动挡，可继续微调")
     }
 
+    fun loadReferenceImage(uri: Uri) {
+        val gen = ++referenceGeneration
+        referenceCall?.cancel(network)
+        referenceCall = null
+        referenceAnalysisJpeg = null
+        referenceCompareJpeg = null
+        referenceState = ReferenceUiState(analyzing = true)
+        onReference(referenceState)
+        worker.execute {
+            val loaded = runCatching { ReferenceImageLoader.load(context, uri) }.getOrNull()
+            main.execute {
+                if (disposed || gen != referenceGeneration) return@execute
+                if (loaded == null) {
+                    referenceState = ReferenceUiState(errorMessage = "无法读取参考图，请换一张图片重试。")
+                    onReference(referenceState)
+                    onMessage("无法读取参考图，请换一张图片。")
+                    return@execute
+                }
+                referenceAnalysisJpeg = loaded.analysisJpeg
+                referenceCompareJpeg = loaded.compactCompareJpeg
+                val configured = requests.config.validationError(BuildConfig.DEBUG) == null
+                referenceState = ReferenceUiState(
+                    previewBitmap = loaded.displayBitmap,
+                    overlayEnabled = false,
+                    overlayAlpha = 0.25f,
+                    analyzing = configured,
+                    recipe = null,
+                    errorMessage = null,
+                )
+                onReference(referenceState)
+                if (configured) {
+                    onMessage("参考图已载入，正在拆解拍摄处方（轻点缩略图可开叠图）")
+                    analyzeReferenceRecipe(gen, loaded.analysisJpeg)
+                } else {
+                    onMessage("参考图已载入，轻点右上角缩略图可开启 25% 叠图")
+                }
+            }
+        }
+    }
+
+    fun retryReferenceAnalysis() {
+        val jpeg = referenceAnalysisJpeg ?: return
+        if (requests.config.validationError(BuildConfig.DEBUG) != null) {
+            onMessage("请先配置视觉模型后再拆解处方。")
+            return
+        }
+        val gen = ++referenceGeneration
+        referenceCall?.cancel(network)
+        referenceCall = null
+        referenceState = referenceState.copy(analyzing = true, errorMessage = null)
+        onReference(referenceState)
+        analyzeReferenceRecipe(gen, jpeg)
+    }
+
+    private fun analyzeReferenceRecipe(gen: Int, analysisJpeg: ByteArray) {
+        val cfg = requests.config
+        val deadline = SystemClock.elapsedRealtimeNanos() + 20_000_000_000L
+        val task = VisionChat(cfg, deadline)
+        referenceCall = task
+        network.execute {
+            val result = runCatching { task.analyzeReference(analysisJpeg) }
+            main.execute {
+                if (disposed || gen != referenceGeneration) return@execute
+                if (referenceCall === task) referenceCall = null
+                result.onSuccess { recipe ->
+                    referenceState = referenceState.copy(analyzing = false, recipe = recipe, errorMessage = null)
+                    onReference(referenceState)
+                    recipe.targetExposure?.let { exp ->
+                        latestAiExposure = exp
+                        if (exposureMode == ExposureControlMode.AI_AUTO && proactivityMode == ProactivityMode.MANUAL) {
+                            pendingAiExposure = exp
+                        }
+                        publishExposureState()
+                    }
+                    onMessage("参考处方已就绪：${recipe.shotType} · 点推荐构图获取复刻与超越建议")
+                }.onFailure { err ->
+                    val notice = (err as? ModelFailure)?.notice ?: "参考图拆解失败，仍可使用半透明叠图和实时推荐。"
+                    referenceState = referenceState.copy(analyzing = false, errorMessage = notice)
+                    onReference(referenceState)
+                }
+            }
+        }
+    }
+
+    fun toggleReferenceOverlay() {
+        if (!referenceState.hasReference) return
+        val next = !referenceState.overlayEnabled
+        referenceState = referenceState.copy(overlayEnabled = next)
+        onReference(referenceState)
+        onMessage(if (next) "已开启参考图半透明叠图" else "已关闭参考图叠图")
+    }
+
+    fun setReferenceOverlayAlpha(alpha: Float) {
+        if (!referenceState.hasReference) return
+        referenceState = referenceState.copy(overlayAlpha = alpha.coerceIn(0.15f, 0.45f))
+        onReference(referenceState)
+    }
+
+    fun clearReferenceImage() {
+        referenceGeneration++
+        referenceCall?.cancel(network)
+        referenceCall = null
+        referenceAnalysisJpeg = null
+        referenceCompareJpeg = null
+        referenceState = ReferenceUiState()
+        onReference(referenceState)
+        onMessage("已清除参考图")
+    }
+
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun applyExposureToHardware() {
         val cam = camera ?: return
@@ -923,8 +1044,12 @@ internal class CameraSession(
         val preferencePrior = aestheticPrefs.read().promptPrior()
         val telemetrySummary = currentTelemetry(source).promptSummary(capabilities)
         val requestExposureAdvice = exposureMode != ExposureControlMode.AUTO
+        val capturedRefRecipe = referenceState.recipe
+        val capturedRefJpeg = referenceCompareJpeg
         onRecommendationStatus(
             when {
+                capturedRefJpeg != null && userTapped -> "正在对照参考图分析所选人物与超越方案…"
+                capturedRefJpeg != null -> "正在对照参考图生成复刻与超越建议…"
                 userTapped -> "正在围绕所选主体构图…"
                 candidates.isNotEmpty() -> "已识别 ${candidates.size} 个候选主体，正在构图…"
                 else -> "正在推荐构图…"
@@ -942,7 +1067,13 @@ internal class CameraSession(
                 val jpeg = sample.use { task.remainingMs(); it.jpeg() }
                 if (BuildConfig.DEBUG) sentJpeg = jpeg
                 sentNs = SystemClock.elapsedRealtimeNanos()
-                Result.success(task.send(jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom, preferencePrior, telemetrySummary, requestExposureAdvice))
+                Result.success(
+                    task.send(
+                        jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom,
+                        preferencePrior, telemetrySummary, requestExposureAdvice,
+                        capturedRefRecipe, capturedRefJpeg,
+                    )
+                )
             } catch (e: Exception) { Result.failure(e) }
             val times = RequestTimes(token.config, token.startedNs, sentNs ?: now, SystemClock.elapsedRealtimeNanos())
             main.execute select@{
@@ -1293,6 +1424,8 @@ internal class CameraSession(
 
     fun dispose() {
         disposed = true
+        referenceCall?.cancel(network)
+        referenceCall = null
         owner.lifecycle.removeObserver(this)
         view.removeOnLayoutChangeListener(layout)
         displays.unregisterDisplayListener(this)

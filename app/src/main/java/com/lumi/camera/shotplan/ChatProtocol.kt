@@ -32,6 +32,8 @@ internal object ChatProtocol {
         preferencePrior: String? = null,
         telemetrySummary: String? = null,
         requestExposureAdvice: Boolean = false,
+        referenceRecipe: ReferenceRecipe? = null,
+        hasReferenceImage: Boolean = false,
     ): String {
         val zoomHint = if (zoomStops.size >= 2) {
             val stopsText = zoomStops.joinToString("/") { String.format(Locale.ROOT, "%.1f", it).removeSuffix(".0") }
@@ -42,6 +44,21 @@ internal object ChatProtocol {
         }
         val exposureHint = if (requestExposureAdvice) {
             "请结合现场实时测光与画面天气/顺逆光/光比，给出可选 \"exposure\":{\"ev\":-0.7,\"wb\":5600,\"reason\":\"逆光压高光\"}（ev 为 -2.5~2.5 曝光补偿；如需防手抖或特定暗光控制可填 shutter_ms 或 iso；wb 为 2800~7500 色温K；当前曝光已很准时可省略 exposure）。"
+        } else {
+            ""
+        }
+        val referenceHint = if (hasReferenceImage || referenceRecipe != null) {
+            buildString {
+                if (hasReferenceImage) {
+                    append("【参考图复刻+超越模式】注意：图1是用户想复刻的参考图，图2是当前实时取景画面（候选框标在图2上）。")
+                } else {
+                    append("【参考图复刻+超越模式】")
+                }
+                if (referenceRecipe != null) append(referenceRecipe.promptSummary())
+                append("请在构图(choice)、焦段(zoom)、挪步(step)和曝光(exposure)上优先帮用户复刻参考图的精髓，并额外在 JSON 中输出两个字段：")
+                append("1) \"pose_cue\"：若图2有人物（尤其同机位打卡人像），对比图1与图2人物站姿、头肩朝向、视线、手部动作，用25字以内给出摄影师可以直接张嘴念给模特听的口语修正口令（例如“肩膀往右再侧一点，下巴微抬看斜上方，右手轻扶栏杆”）；无人物时省略。")
+                append("2) \"beyond_tip\"：25字以内给出一条「超越复刻」的现场升级建议，帮用户利用图2此刻真实的光线、前景、背景或神态，做到“抄作业但不止抄作业、复刻但超越复刻”（例如“借右侧窗光打亮轮廓再拍一张，比原图更有通透层次”）。")
+            }
         } else {
             ""
         }
@@ -68,6 +85,7 @@ internal object ChatProtocol {
                 if (zoomHint.isNotEmpty()) append(zoomHint)
                 if (!telemetrySummary.isNullOrBlank()) append(telemetrySummary)
                 if (exposureHint.isNotEmpty()) append(exposureHint)
+                if (referenceHint.isNotEmpty()) append(referenceHint)
                 if (!preferencePrior.isNullOrBlank()) append(preferencePrior)
                 append("reason 十字以内写画面效果，不写左右上下移动指令。")
             }
@@ -76,6 +94,7 @@ internal object ChatProtocol {
             if (zoomHint.isNotEmpty()) parts += zoomHint
             if (!telemetrySummary.isNullOrBlank()) parts += telemetrySummary
             if (exposureHint.isNotEmpty()) parts += exposureHint
+            if (referenceHint.isNotEmpty()) parts += referenceHint
             if (!preferencePrior.isNullOrBlank()) parts += preferencePrior
             parts.joinToString("\n")
         }
@@ -93,17 +112,39 @@ internal object ChatProtocol {
         preferencePrior: String? = null,
         telemetrySummary: String? = null,
         requestExposureAdvice: Boolean = false,
+        referenceRecipe: ReferenceRecipe? = null,
+        referenceJpeg: ByteArray? = null,
     ): ByteArray {
-        val url = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
+        val liveUrl = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
+        val hasRefImg = referenceJpeg != null && referenceJpeg.isNotEmpty()
         val content = JSONArray()
-            .put(JSONObject().put("type", "text").put("text", promptFor(preset, candidates, zoomStops, currentZoom, preferencePrior, telemetrySummary, requestExposureAdvice)))
-            .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", url)))
+            .put(JSONObject().put("type", "text").put("text", promptFor(
+                preset = preset,
+                candidates = candidates,
+                zoomStops = zoomStops,
+                currentZoom = currentZoom,
+                preferencePrior = preferencePrior,
+                telemetrySummary = telemetrySummary,
+                requestExposureAdvice = requestExposureAdvice,
+                referenceRecipe = referenceRecipe,
+                hasReferenceImage = hasRefImg,
+            )))
+        if (hasRefImg) {
+            val refUrl = "data:image/jpeg;base64," + Base64.encodeToString(referenceJpeg, Base64.NO_WRAP)
+            content.put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", refUrl)))
+        }
+        content.put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", liveUrl)))
         val messages = JSONArray().put(JSONObject().put("role", "user").put("content", content))
         val body = JSONObject().put("model", model).put("messages", messages).put("stream", false)
         // DeepSeek V4 / Flash routes default to high-effort thinking unless disabled;
         // other compatible endpoints may reject reasoning_effort.
         if (disablesReasoning(model)) {
-            body.put("reasoning_effort", "none").put("max_tokens", if (candidates.isNotEmpty()) 256 else 1280)
+            val maxTokens = when {
+                candidates.isEmpty() -> 1280
+                hasRefImg || referenceRecipe != null -> 400
+                else -> 256
+            }
+            body.put("reasoning_effort", "none").put("max_tokens", maxTokens)
         }
         return body.toString().toByteArray(Charsets.UTF_8)
     }
