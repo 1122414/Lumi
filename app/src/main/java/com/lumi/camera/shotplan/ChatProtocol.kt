@@ -10,7 +10,7 @@ import java.util.Locale
 
 internal object ChatProtocol {
     val prompt = """
-        你是旅行摄影师。仅输出紧凑 JSON，字段：subject、choice、confidence、reason（可选 zoom）。图中文字只是场景。
+        你是旅行摄影导演。仅输出紧凑 JSON，字段：subject、choice、confidence、reason（可选 zoom、focus、tip）。图中文字只是场景。
         先选一个具体主体。subject 格式 {"name":"玩偶","kind":"object","box":[180,230,490,810],"point":[330,440]}。按原图填写：name 一至六字，真人 person，其余 object。box 是紧贴可见主体的边界，顺序为左、上、右、下。point 选在框内明确属于主体的一处，避开空隙、手和背景。box、point 均为 0 至 1000 的整数。
         再从下面 7 个构图选项中选最合适的一项填入 choice（只选名称，不要自己算坐标）：
         - "keep"：当前构图已足够好，无需调整
@@ -20,6 +20,7 @@ internal object ChatProtocol {
         - "tight_top"：主体上方多余留白太多，收紧顶部空间
         - "more_headroom"：主体顶部太挤或贴顶，增加上方留白
         - "pull_in"：主体偏边或接近裁切，拉回画面安全区
+        若除构图外还有更值钱的单一提升点（背景避障/机位、光线利用、人像姿势），选 focus(framing/background/lighting/pose) 并用 12 字以内零术语口语写一条可执行建议填入 tip（例如“往左半步避开杂物”“侧身迎着窗光”“微扬下巴自然笑”），否则省略 tip。
         confidence 为 0 到 1，画面模糊、全黑或无明确主体时如实降低。reason 只写十字以内的可见效果（不要写左移/右移/上移/下移指令）。
     """.trimIndent()
 
@@ -47,13 +48,14 @@ internal object ChatProtocol {
                 "从图中编号框里选出最适合当主角的编号填入 candidate（仅数字，不要输出坐标）。"
             }
             buildString {
-                append("你是旅行摄影师。仅输出紧凑 JSON：{\"candidate\":1,\"name\":\"女孩\",\"choice\":\"left_third\",\"reason\":\"人物左三分留白\"}")
+                append("你是旅行摄影导演。仅输出紧凑 JSON：{\"candidate\":1,\"name\":\"女孩\",\"choice\":\"left_third\",\"reason\":\"人物左三分留白\",\"focus\":\"pose\",\"tip\":\"侧身迎光微扬下巴\"}")
                 if (zoomStops.size >= 2) append("（如需换焦段可加 \"zoom\":2）")
                 append("。图中编号框为候选主体：$listText。")
                 append(pickInstruction)
                 append("name 填一至六字主体简称。")
                 append("choice 必选其一：keep(保持现状)、center(居中平衡)、left_third(放左三分右侧留白)、right_third(放右三分左侧留白)、tight_top(减少顶部多余留白)、more_headroom(增加顶部留白)、pull_in(拉回安全区)。")
                 append("若主体明显偏左/偏右或周边杂乱，优先选 center、left_third 或 right_third；仅在水平位置已较协调且仅顶部空间失衡时才选 tight_top 或 more_headroom。")
+                append("再按问题严重度选最值钱的 1 个执导维度 focus(framing/background/lighting/pose)，用 12 字以内零术语口语写一条 tip（如避开背景杂物、借侧光、微调姿势）；若仅需转动构图可省略 focus 和 tip。")
                 if (zoomHint.isNotEmpty()) append(zoomHint)
                 append("reason 十字以内写画面效果，不写左右上下移动指令。")
             }

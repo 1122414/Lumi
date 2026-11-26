@@ -70,12 +70,19 @@ import com.lumi.camera.shotplan.CompositionChoice
 import com.lumi.camera.shotplan.CompositionDiagnostic
 import com.lumi.camera.shotplan.CompositionPreset
 import com.lumi.camera.shotplan.ConnectionResult
+import com.lumi.camera.shotplan.DirectorCategory
+import com.lumi.camera.shotplan.DirectorCue
 import com.lumi.camera.shotplan.ModelConfig
 import com.lumi.camera.shotplan.ModelConfigStore
 import com.lumi.camera.shotplan.PresetSelection
+import com.lumi.camera.shotplan.ProactivityMode
 import com.lumi.camera.shotplan.SavedDiagnostic
 import com.lumi.camera.shotplan.SubjectCandidates
+import com.lumi.camera.vision.NormalizedCrop
+import com.lumi.camera.vision.PostShotRecrop
+import com.lumi.camera.vision.PostShotReview
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.cos
@@ -162,6 +169,13 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     var lastFailed by remember { mutableStateOf(store.lastFailed) }
     var settingsOpen by remember { mutableStateOf(false) }
     var diagnosticOpen by remember { mutableStateOf(false) }
+    val uiPrefs = remember(context) { context.getSharedPreferences("lumi_ui_prefs", android.content.Context.MODE_PRIVATE) }
+    var proactivityMode by remember {
+        mutableStateOf(ProactivityMode.fromWire(uiPrefs.getString("proactivity_mode", null)))
+    }
+    var lastReview by remember { mutableStateOf<PostShotReview?>(null) }
+    var reviewBannerVisible by remember { mutableStateOf(false) }
+    var reviewDialogOpen by remember { mutableStateOf(false) }
     var autoShoot by remember { mutableStateOf(false) }
     var autoShootProgress by remember { mutableFloatStateOf(0f) }
     var autoShotFired by remember { mutableStateOf(false) }
@@ -177,7 +191,19 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
             frame = next
             if (next.ring != null || !next.hasTarget) paintRing = next.ring
         }, { bound = it }, onMessage, { recommendationStatus = it }, config,
-            { setFailure(it != ConnectionResult.SUCCESS) }, { zoom = it }, { lens = it }, { presetSelection = it })
+            { setFailure(it != ConnectionResult.SUCCESS) }, { zoom = it }, { lens = it }, { presetSelection = it },
+            onCaptured = { review ->
+                lastReview = review
+                reviewBannerVisible = true
+            },
+            initialProactivity = proactivityMode)
+    }
+    LaunchedEffect(lastReview?.capturedAtMs) {
+        if (lastReview != null) {
+            reviewBannerVisible = true
+            delay(3200L)
+            reviewBannerVisible = false
+        }
     }
     DisposableEffect(session) {
         onSession(session)
@@ -290,22 +316,66 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                     }
                     drawCircle(Color.White, 3.dp.toPx(), mid)
                 }
-                frame.suggestedZoom?.let { targetZoom ->
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 10.dp, start = 12.dp, end = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    frame.suggestedZoom?.let { targetZoom ->
+                        Surface(
+                            onClick = session::applySuggestedZoom,
+                            shape = RoundedCornerShape(18.dp),
+                            color = Color(0xCC102016),
+                            border = BorderStroke(1.dp, Color(0xFF38DF85)),
+                        ) {
+                            Text(
+                                text = "建议切至 ${SubjectCandidates.formatZoomLabel(targetZoom)}",
+                                color = Color(0xFF38DF85),
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                    frame.directorCue?.let { cue ->
+                        DirectorCuePill(cue)
+                    }
+                }
+                val bannerReview = lastReview
+                if (reviewBannerVisible && bannerReview != null) {
                     Surface(
-                        onClick = session::applySuggestedZoom,
-                        shape = RoundedCornerShape(18.dp),
-                        color = Color(0xCC102016),
-                        border = BorderStroke(1.dp, Color(0xFF38DF85)),
+                        onClick = {
+                            reviewBannerVisible = false
+                            reviewDialogOpen = true
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color(0xD9161B18),
+                        border = BorderStroke(1.dp, Color(0x99B3DBBE)),
                         modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(top = 12.dp),
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = if (bound && zoom.max > zoom.min) 52.dp else 12.dp, start = 14.dp, end = 14.dp),
                     ) {
-                        Text(
-                            text = "建议切至 ${SubjectCandidates.formatZoomLabel(targetZoom)}",
-                            color = Color(0xFF38DF85),
-                            fontSize = 13.sp,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                        )
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = bannerReview.summary,
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            Text(
+                                text = "二次构图 ›",
+                                color = Color(0xFF38DF85),
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                            )
+                        }
                     }
                 }
                 if (bound && zoom.max > zoom.min) {
@@ -327,6 +397,38 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                     else -> "可用"
                 }, fontSize = 12.sp)
             }
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        when (proactivityMode) {
+                            ProactivityMode.PROACTIVE -> Color(0xFF4FC3F7)
+                            ProactivityMode.QUIET -> Color(0x22FFFFFF)
+                            ProactivityMode.MANUAL -> Color(0x2EFFFFFF)
+                        }
+                    )
+                    .clickable(role = Role.Button) {
+                        val next = proactivityMode.next()
+                        proactivityMode = next
+                        uiPrefs.edit().putString("proactivity_mode", next.wire).apply()
+                        session.setProactivityMode(next)
+                        onMessage(when (next) {
+                            ProactivityMode.PROACTIVE -> "主动模式：停稳或画面异常时自动分析"
+                            ProactivityMode.QUIET -> "安静模式：仅保留水平仪与手动辅助线"
+                            ProactivityMode.MANUAL -> "手动模式：点击推荐或轻点主体触发"
+                        })
+                    }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = proactivityMode.label,
+                    color = if (proactivityMode == ProactivityMode.PROACTIVE) Color(0xFF0A1C24) else Color(0xFFE0E5E2),
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                )
+            }
+            Spacer(Modifier.width(6.dp))
             Box(
                 Modifier
                     .clip(RoundedCornerShape(12.dp))
@@ -383,12 +485,23 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                     frame.hasTarget && frame.ring == null -> "正在寻找原主体"
                     frame.hasTarget && rollWarn -> "构图引导中 · 调平画面"
                     frame.hasTarget -> "构图引导中"
+                    proactivityMode == ProactivityMode.QUIET -> "安静模式 · 仅水平仪与辅助线"
+                    proactivityMode == ProactivityMode.PROACTIVE -> "主动模式 · 停稳画面自动推荐构图"
                     else -> "轻点主体或点击推荐构图"
                 }, color = Color.White, fontSize = 13.sp)
             }
             PresetPillBar(presetSelection, onSelect = session::selectPreset)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(session::recommend, enabled = bound && !zoom.changing && configured) { Text("推荐构图") }
+                lastReview?.let { review ->
+                    LastPhotoThumb(review = review, onClick = {
+                        reviewBannerVisible = false
+                        reviewDialogOpen = true
+                    })
+                }
+                Button(
+                    session::recommend,
+                    enabled = bound && !zoom.changing && configured && proactivityMode != ProactivityMode.QUIET,
+                ) { Text("推荐构图") }
                 OutlinedButton(onShoot, enabled = bound && !zoom.changing) { Text("拍照并保存") }
                 if (lens.canSwitch) {
                     CameraFlipButton(
@@ -409,6 +522,14 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
             settingsOpen = false
         })
     if (diagnosticOpen && BuildConfig.DEBUG) DiagnosticDialog(onDismiss = { diagnosticOpen = false })
+    val activeReview = lastReview
+    if (reviewDialogOpen && activeReview != null) {
+        PostShotReviewDialog(
+            review = activeReview,
+            onDismiss = { reviewDialogOpen = false },
+            onSavedCopy = { msg -> onMessage(msg) },
+        )
+    }
 }
 
 @Composable
@@ -617,6 +738,192 @@ private fun CameraFlipButton(front: Boolean, enabled: Boolean, onClick: () -> Un
                 lineTo(w * 0.13f, h * 0.88f)
             }
             drawPath(bottomArrow, tint, style = stroke)
+        }
+    }
+}
+
+@Composable
+private fun DirectorCuePill(cue: DirectorCue) {
+    val accent = when (cue.category) {
+        DirectorCategory.LIGHTING -> Color(0xFFFFD54F)
+        DirectorCategory.POSE -> Color(0xFFFFAB91)
+        DirectorCategory.BACKGROUND -> Color(0xFF81D4FA)
+        DirectorCategory.FRAMING -> Color(0xFFB3DBBE)
+    }
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xBF141917),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.72f)),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(accent.copy(alpha = 0.22f))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            ) {
+                Text(cue.category.badge, color = accent, fontSize = 11.sp, maxLines = 1)
+            }
+            Text(cue.tip, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun LastPhotoThumb(review: PostShotReview, onClick: () -> Unit) {
+    val context = LocalContext.current
+    val thumb by produceState<android.graphics.Bitmap?>(null, review.photoUri) {
+        value = withContext(Dispatchers.IO) { PostShotRecrop.loadPreviewBitmap(context, review.photoUri, maxEdge = 160) }
+    }
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(10.dp),
+        color = Color(0x33FFFFFF),
+        border = BorderStroke(1.dp, Color(0xFFB3DBBE)),
+        modifier = Modifier
+            .size(40.dp)
+            .semantics { contentDescription = "打开上次成片轻复盘与二次构图" },
+    ) {
+        val bmp = thumb
+        if (bmp != null) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = "上次拍摄缩略图",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("复盘", color = Color(0xFFB3DBBE), fontSize = 10.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PostShotReviewDialog(
+    review: PostShotReview,
+    onDismiss: () -> Unit,
+    onSavedCopy: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val previewBitmap by produceState<android.graphics.Bitmap?>(null, review.photoUri) {
+        value = withContext(Dispatchers.IO) { PostShotRecrop.loadPreviewBitmap(context, review.photoUri, maxEdge = 1080) }
+    }
+    var selectedProposalId by remember(review.photoUri) { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    val activeProposal = review.proposals.firstOrNull { it.id == selectedProposalId }
+    val activeCrop: NormalizedCrop? = activeProposal?.crop
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = MaterialTheme.shapes.large) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("拍后轻复盘 · 二次构图", style = MaterialTheme.typography.titleMedium)
+                Text(review.summary, fontSize = 13.sp, color = Color(0xFFD5E0DA))
+                val bmp = previewBitmap
+                if (bmp != null) {
+                    val displayBmp = remember(bmp, activeCrop) {
+                        if (activeCrop == null) bmp else {
+                            val x = (activeCrop.left * bmp.width).toInt().coerceIn(0, bmp.width - 1)
+                            val y = (activeCrop.top * bmp.height).toInt().coerceIn(0, bmp.height - 1)
+                            val w = (activeCrop.width * bmp.width).toInt().coerceIn(1, bmp.width - x)
+                            val h = (activeCrop.height * bmp.height).toInt().coerceIn(1, bmp.height - y)
+                            android.graphics.Bitmap.createBitmap(bmp, x, y, w, h)
+                        }
+                    }
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(displayBmp.width.toFloat() / displayBmp.height.toFloat())
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.Black),
+                    ) {
+                        Image(
+                            bitmap = displayBmp.asImageBitmap(),
+                            contentDescription = "二次构图预览",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                } else {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(220.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF141816)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("正在加载照片…", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+                    }
+                }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = selectedProposalId == null,
+                        onClick = { selectedProposalId = null },
+                        label = { Text("原图底片", fontSize = 12.sp) },
+                    )
+                    review.proposals.forEach { proposal ->
+                        FilterChip(
+                            selected = selectedProposalId == proposal.id,
+                            onClick = { selectedProposalId = proposal.id },
+                            label = { Text(proposal.title, fontSize = 12.sp) },
+                        )
+                    }
+                }
+                activeProposal?.let {
+                    Text(it.subtitle, fontSize = 12.sp, color = Color(0xFFB3DBBE))
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onDismiss, enabled = !saving) { Text("关闭") }
+                    if (activeProposal != null) {
+                        Button(
+                            enabled = !saving,
+                            onClick = {
+                                saving = true
+                                scope.launch {
+                                    val saved = withContext(Dispatchers.IO) {
+                                        PostShotRecrop.saveCroppedCopy(
+                                            context = context,
+                                            sourceUri = review.photoUri,
+                                            crop = activeProposal.crop,
+                                            suffix = activeProposal.id,
+                                        )
+                                    }
+                                    saving = false
+                                    onSavedCopy(
+                                        if (saved != null) "已保存「${activeProposal.title}」副本（原图已保留）"
+                                        else "保存裁切副本失败，请检查存储权限。"
+                                    )
+                                    if (saved != null) onDismiss()
+                                }
+                            },
+                        ) {
+                            Text(if (saving) "保存中…" else "保存裁切副本")
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -42,6 +42,7 @@ internal data class SceneFrame(
     val outline: SeenOutline? = null,
     val shift: TrackedShift? = null,
     val faces: List<FaceBox> = emptyList(),
+    val meanLuma: Int? = null,
 )
 
 internal class CompositionAnalyzer(
@@ -69,8 +70,10 @@ internal class CompositionAnalyzer(
     val pendingFrame = PendingRecommendationFrame()
 
     @Volatile var watchPerson = false
+    @Volatile var proactiveMonitor = false
     @Volatile var tracker: SubjectTracker? = null
     @Volatile var expectedZoom = 1f
+    private var lastProactiveFaceCheckNs = 0L
 
     fun prepareSelection() = segmenter.prepare()
 
@@ -116,9 +119,12 @@ internal class CompositionAnalyzer(
                     SystemClock.elapsedRealtimeNanos() - captured !in 0..RotationGuidance.FRESH_NS) empty else {
                     // The single CameraX analysis worker owns the proxy until ML Kit finishes.
                     val activeTracker = tracker
-                    val input = if (request != null || watchPerson) InputImage.fromMediaImage(media, frame.rotation) else null
+                    val runProactiveFace = proactiveMonitor && (captured - lastProactiveFaceCheckNs >= PROACTIVE_FACE_INTERVAL_NS)
+                    if (runProactiveFace) lastProactiveFaceCheckNs = captured
+                    val input = if (request != null || watchPerson || runProactiveFace) InputImage.fromMediaImage(media, frame.rotation) else null
                     val detection = input?.let { detector.process(it) }
                     val objectDetection = if (request != null && input != null) objectDetector.process(input) else null
+                    val meanLuma = if (proactiveMonitor) sampleMeanLuma(image, frame) else null
                     val pixels = try {
                         when {
                             request != null -> SubjectPixels.read(image, frame, targetHeight = 256)
@@ -173,6 +179,7 @@ internal class CompositionAnalyzer(
                         pixels = if (request != null) pixels else null,
                         shift = shift,
                         faces = faceBoxes,
+                        meanLuma = meanLuma,
                     )
                 }
             } catch (e: Exception) {
@@ -192,10 +199,38 @@ internal class CompositionAnalyzer(
         }
     }
 
+    private fun sampleMeanLuma(image: ImageProxy, frame: FrameGeometry): Int? {
+        val yPlane = image.planes.firstOrNull() ?: return null
+        val buf = yPlane.buffer
+        val start = buf.position()
+        val ref = frame.referenceSize
+        var sum = 0
+        var count = 0
+        for (row in 1..6) {
+            val py = (row / 7f) * ref.height
+            for (col in 1..6) {
+                val px = (col / 7f) * ref.width
+                val raw = frame.referenceToAnalysis(px, py)
+                val rx = raw.x.toInt().coerceIn(0, image.width - 1)
+                val ry = raw.y.toInt().coerceIn(0, image.height - 1)
+                val idx = start + ry * yPlane.rowStride + rx * yPlane.pixelStride
+                if (idx in 0 until buf.limit()) {
+                    sum += buf.get(idx).toInt() and 0xFF
+                    count++
+                }
+            }
+        }
+        return if (count > 0) sum / count else null
+    }
+
     override fun close() {
         pendingFrame.await(null)
         detector.close()
         objectDetector.close()
         segmenter.close()
+    }
+
+    companion object {
+        private const val PROACTIVE_FACE_INTERVAL_NS = 350_000_000L
     }
 }

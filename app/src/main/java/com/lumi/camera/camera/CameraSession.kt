@@ -45,12 +45,15 @@ import com.lumi.camera.shotplan.CompositionDiagnostic
 import com.lumi.camera.shotplan.CompositionPreset
 import com.lumi.camera.shotplan.ConnectionResult
 import com.lumi.camera.shotplan.DiagnosticInput
+import com.lumi.camera.shotplan.DirectorCue
 import com.lumi.camera.shotplan.ModelConfig
 import com.lumi.camera.shotplan.ModelFailure
 import com.lumi.camera.shotplan.ModelReply
 import com.lumi.camera.shotplan.PlanProblem
 import com.lumi.camera.shotplan.PlanResult
 import com.lumi.camera.shotplan.PresetSelection
+import com.lumi.camera.shotplan.ProactiveTrigger
+import com.lumi.camera.shotplan.ProactivityMode
 import com.lumi.camera.shotplan.RecommendationRequests
 import com.lumi.camera.shotplan.RememberedComposition
 import com.lumi.camera.shotplan.RequestToken
@@ -58,6 +61,8 @@ import com.lumi.camera.shotplan.SubjectCandidate
 import com.lumi.camera.shotplan.VisionChat
 import com.lumi.camera.vision.CompositionAnalyzer
 import com.lumi.camera.vision.OutlineAttempt
+import com.lumi.camera.vision.PostShotRecrop
+import com.lumi.camera.vision.PostShotReview
 import com.lumi.camera.vision.RecommendationFrame
 import com.lumi.camera.vision.SubjectOutline
 import com.lumi.camera.vision.SubjectTracker
@@ -91,6 +96,7 @@ internal data class Viewfinder(
     val candidates: List<CandidateOverlay> = emptyList(),
     val tapPoint: Point? = null,
     val viewpointDrifted: Boolean = false,
+    val directorCue: DirectorCue? = null,
 )
 
 internal data class ViewfinderZoom(val ratio: Float = 1f, val min: Float = 1f, val max: Float = 1f,
@@ -110,6 +116,8 @@ internal class CameraSession(
     private val onZoom: (ViewfinderZoom) -> Unit,
     private val onLens: (ViewfinderLens) -> Unit = {},
     private val onPreset: (PresetSelection) -> Unit = {},
+    private val onCaptured: (PostShotReview) -> Unit = {},
+    initialProactivity: ProactivityMode = ProactivityMode.MANUAL,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
     private data class Binding(val size: Extent, val rotation: Int, val lensFacing: Int)
     private val context = view.context
@@ -151,6 +159,9 @@ internal class CameraSession(
     }
     private data class Selection(val name: String, val geometry: FrameGeometry, val source: Observation?, val outline: SubjectOutline?)
     private var presetSelection = PresetSelection()
+    private var proactivityMode = initialProactivity
+    private val proactiveTrigger = ProactiveTrigger()
+    private var lastReadyState = false
     private var selection: Selection? = null
     private var run: Run? = null
     private var pendingCandidates: List<SubjectCandidate> = emptyList()
@@ -260,6 +271,7 @@ internal class CameraSession(
                 }
             }
             observer = analyzer
+            analyzer.proactiveMonitor = proactivityMode == ProactivityMode.PROACTIVE
             analysis.setAnalyzer(worker, analyzer)
             binding = next
             capture = photo
@@ -379,6 +391,21 @@ internal class CameraSession(
             }
         }
         render()
+        if (proactivityMode == ProactivityMode.PROACTIVE &&
+            requests.config.validationError(BuildConfig.DEBUG) == null) {
+            val trigger = proactiveTrigger.evaluate(
+                nowNs = now,
+                pose = poses?.latestAt(now) ?: frame.observation?.pose,
+                rollDeg = (poses?.latestAt(now) ?: frame.observation?.pose)?.horizonRollDeg(),
+                faces = frame.faces,
+                meanLuma = frame.meanLuma,
+                hasActiveGuidance = run != null,
+                isRequestBusy = requests.active != null,
+            )
+            if (trigger != null) {
+                recommend(null, null, trigger.statusHint)
+            }
+        }
         handler.postDelayed(expire, (RotationGuidance.FRESH_NS - age) / 1_000_000L + 1)
     }
 
@@ -467,6 +494,7 @@ internal class CameraSession(
         }
         val viewpointDrifted = active != null && pose != null && lens != null &&
             active.target.isViewpointDrifted(pose, lens)
+        lastReadyState = guide.ready
         onFrame(Viewfinder(
             canRemember = current != null,
             hasTarget = active != null,
@@ -481,6 +509,7 @@ internal class CameraSession(
             candidates = candidateOverlays,
             tapPoint = pendingTapPreview,
             viewpointDrifted = viewpointDrifted,
+            directorCue = active?.target?.directorCue,
         ))
     }
 
@@ -569,6 +598,26 @@ internal class CameraSession(
         runCatching { cam.cameraControl.startFocusAndMetering(action) }
     }
 
+    fun setProactivityMode(mode: ProactivityMode) {
+        if (proactivityMode == mode) return
+        proactivityMode = mode
+        observer?.proactiveMonitor = mode == ProactivityMode.PROACTIVE
+        proactiveTrigger.reset()
+        if (mode == ProactivityMode.QUIET) {
+            cancelRecommendation()
+            view.removeCallbacks(drawDirection)
+            run = null
+            selection = null
+            latestShift = null
+            trackerLostSinceNs = null
+            subjectLostNotified = false
+            lastReadyState = false
+            observer?.apply { watchPerson = false; tracker = null }
+            onRecommendationStatus(null)
+            render()
+        }
+    }
+
     fun tapSubject(x: Float, y: Float) {
         val size = binding?.size ?: return
         if (zoom.changing) return
@@ -581,7 +630,7 @@ internal class CameraSession(
         } else {
             Uv((x / size.width).toDouble().coerceIn(0.01, 0.99), (y / size.height).toDouble().coerceIn(0.01, 0.99))
         }
-        if (requests.config.validationError(BuildConfig.DEBUG) != null) {
+        if (proactivityMode == ProactivityMode.QUIET || requests.config.validationError(BuildConfig.DEBUG) != null) {
             pendingTapPreview = Point(x, y)
             render()
             handler.postDelayed({
@@ -600,23 +649,28 @@ internal class CameraSession(
         if (targetZoom in zoom.min..zoom.max) setZoom(targetZoom)
     }
 
-    fun recommend() = recommend(null, null)
+    fun recommend() = recommend(null, null, null)
 
-    private fun recommend(tapUv: Uv?, tapPreview: Point?) {
+    private fun recommend(tapUv: Uv?, tapPreview: Point?, statusOverride: String? = null) {
+        if (proactivityMode == ProactivityMode.QUIET) return
         if (binding == null || zoom.changing || requests.config.validationError(BuildConfig.DEBUG) != null) return
         val now = SystemClock.elapsedRealtimeNanos()
+        if (statusOverride == null) {
+            proactiveTrigger.onManualOrCaptured(now, poses?.latestAt(now) ?: latest?.observation?.pose)
+        }
         cancelRecommendation()
         run = null
         selection = null
         latestShift = null
         trackerLostSinceNs = null
         subjectLostNotified = false
+        lastReadyState = false
         pendingTapPreview = tapPreview
         observer?.apply { watchPerson = false; tracker = null }
         render()
         val token = requests.begin(now, tapUv)
         observer?.pendingFrame?.await(token)
-        onRecommendationStatus(if (tapUv != null) "已锁定点选区域，正在构图…" else "正在取景…")
+        onRecommendationStatus(statusOverride ?: if (tapUv != null) "已锁定点选区域，正在构图…" else "正在取景…")
         handler.postDelayed(timeout, (token.deadlineNs - now) / 1_000_000L)
     }
 
@@ -880,6 +934,18 @@ internal class CameraSession(
     fun save() {
         if (zoom.changing) return
         val photo = capture ?: return
+        val now = SystemClock.elapsedRealtimeNanos()
+        val capturePose = poses?.latestAt(now) ?: latest?.observation?.pose
+        val captureLens = liveLens(run?.target?.observation?.lens ?: latest?.observation?.lens)
+        val captureBounds = (if (run != null && capturePose != null && captureLens != null) {
+            run?.target?.liveSubjectBounds(capturePose, captureLens, latestShift)
+        } else null)
+            ?: selection?.outline?.bounds
+            ?: latest?.box
+        val captureRoll = capturePose?.horizonRollDeg()
+        val captureReady = lastReadyState
+        val captureReason = run?.reason ?: selection?.name
+        val captureCue = run?.target?.directorCue
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "Lumi_${System.currentTimeMillis()}.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -896,7 +962,22 @@ internal class CameraSession(
             .build()
         photo.takePicture(output, main, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                if (!disposed) onMessage("照片已保存到系统相册。")
+                if (disposed) return
+                proactiveTrigger.onManualOrCaptured(SystemClock.elapsedRealtimeNanos(), capturePose)
+                val uri = result.savedUri
+                if (uri != null) {
+                    val review = PostShotRecrop.buildReview(
+                        photoUri = uri,
+                        subjectBounds = captureBounds,
+                        rollDeg = captureRoll,
+                        wasReady = captureReady,
+                        reason = captureReason,
+                        directorCue = captureCue,
+                    )
+                    onCaptured(review)
+                } else {
+                    onMessage("照片已保存到系统相册。")
+                }
             }
             override fun onError(exception: ImageCaptureException) {
                 Log.w("LumiCamera", "Save failed", exception)
@@ -925,6 +1006,8 @@ internal class CameraSession(
         latestShift = null
         trackerLostSinceNs = null
         subjectLostNotified = false
+        lastReadyState = false
+        proactiveTrigger.reset()
         run = null
         selection = null
         poses?.close()
