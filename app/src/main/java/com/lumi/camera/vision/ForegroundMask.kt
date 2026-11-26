@@ -18,9 +18,43 @@ internal class ForegroundMask private constructor(val width: Int, val height: In
         return at(w,h,bytes,seed)
     }
 
+    // Merge another part of the same multi-colored subject (e.g. doll body + head) when touching or within 2px.
+    fun mergeWith(other: ForegroundMask, seed: Uv): ForegroundMask? {
+        if (width != other.width || height != other.height) return null
+        var touches = false
+        outer@ for (y in 0 until height) {
+            for (x in 0 until width) {
+                val i = y * width + x
+                if (!inside[i]) continue
+                for (dy in -2..2) for (dx in -2..2) {
+                    val nx = x + dx
+                    val ny = y + dy
+                    if (nx in 0 until width && ny in 0 until height && other.inside[ny * width + nx]) {
+                        touches = true
+                        break@outer
+                    }
+                }
+            }
+        }
+        if (!touches) return null
+        val bytes = ByteArray(inside.size) { i -> if (inside[i] || other.inside[i]) 0 else -1 }
+        // Bridge 1-2px gaps so the combined mask forms a single 4-connected contour.
+        val bridged = bytes.copyOf()
+        for (y in 1 until height - 1) {
+            for (x in 1 until width - 1) {
+                val i = y * width + x
+                if (bridged[i] == 0.toByte()) continue
+                val horiz = bytes[i - 1] == 0.toByte() && bytes[i + 1] == 0.toByte()
+                val vert = bytes[i - width] == 0.toByte() && bytes[i + width] == 0.toByte()
+                if (horiz || vert) bridged[i] = 0
+            }
+        }
+        return at(width, height, bridged, seed)
+    }
+
     // The coarse instance selection may veto pixels, but never paints a boundary.
     // Where it cuts through a fused foreground (e.g. a toy touching a mirror), leave a gap.
-    fun constrained(polygon: List<Uv>, seed: Uv): ForegroundMask? {
+    fun constrained(polygon: List<Uv>, seed: Uv, minRetention: Double = 0.5): ForegroundMask? {
         if (polygon.size < 3) return null
         val allowed = BooleanArray(inside.size)
         val margin = maxOf(2, (width * 0.022).toInt())
@@ -42,7 +76,7 @@ internal class ForegroundMask private constructor(val width: Int, val height: In
         }
         val bytes = ByteArray(inside.size) { if (inside[it] && allowed[it]) 0 else -1 }
         val trimmed = at(width,height,bytes,seed, original = inside) ?: return null
-        return trimmed.takeIf { it.area >= area*0.5 }
+        return trimmed.takeIf { it.area >= area*minRetention }
     }
 
     companion object {

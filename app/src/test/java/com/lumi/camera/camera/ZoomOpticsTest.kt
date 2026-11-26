@@ -15,6 +15,7 @@ class ZoomOpticsTest {
         val tele = 7.1f / 6.5536f
         assertEquals(listOf(1f, 2f), lensZoomStops(main, listOf(main, tele), "other"))
         assertEquals(listOf(1f, 2f, 4f), lensZoomStops(main, listOf(main, tele), "PKX110"))
+        assertEquals(listOf(1f, 2f), lensZoomStops(main, listOf(main, tele), "PKX110", rear = false))
         assertEquals(listOf(1f), lensZoomStops(null, emptyList(), "unknown"))
         assertEquals(listOf(0.6f, 1f, 3.5f), lensZoomStops(1f, listOf(0.6f, 1f, 3.5f, Float.NaN), "other"))
     }
@@ -33,6 +34,7 @@ class ZoomOpticsTest {
         for (ratio in listOf(0.6f, 1f, 2f, 3.25f)) {
             assertEquals(5f*ratio, zoomedFocal(5f, ratio, ratio)!!, 0.0001f)
         }
+        assertEquals(5f * 1.98f, zoomedFocal(5f, 1.98f, 2.0f)!!, 0.0001f)
         assertNull(zoomedFocal(5f, 1f, 2f))
         assertNull(zoomedFocal(null, 2f, 2f))
         assertNull(zoomedFocal(5f, Float.NaN, 2f))

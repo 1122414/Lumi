@@ -1,6 +1,7 @@
 package com.lumi.camera.vision
 
 import android.content.Context
+import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
 import androidx.camera.core.ExperimentalGetImage
@@ -10,43 +11,86 @@ import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.objects.ObjectDetection
+import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
 import com.lumi.camera.camera.CameraOptics
 import com.lumi.camera.camera.CameraPose
 import com.lumi.camera.camera.Crop
 import com.lumi.camera.camera.Extent
 import com.lumi.camera.camera.FrameGeometry
 import com.lumi.camera.camera.Point
-import com.lumi.camera.guidance.SubjectPosition
 import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.RotationGuidance
+import com.lumi.camera.guidance.SubjectPosition
 import com.lumi.camera.guidance.Uv
-import com.lumi.camera.shotplan.SelectedSubject
 import com.lumi.camera.shotplan.PendingRecommendationFrame
 import com.lumi.camera.shotplan.RequestToken
+import com.lumi.camera.shotplan.SelectedSubject
+import com.lumi.camera.shotplan.SubjectCandidate
+import com.lumi.camera.shotplan.SubjectCandidates
 
 internal data class FaceBox(val left: Double, val top: Double, val right: Double, val bottom: Double)
-internal data class SceneFrame(val sequence: Long, val capturedNs: Long, val geometry: FrameGeometry,
-    val observation: Observation?, val box: FaceBox?, val background: Background?,
-    val pixels: SubjectPixels? = null, val follower: SubjectOutline? = null, val outline: SeenOutline? = null)
+internal data class SceneFrame(
+    val sequence: Long,
+    val capturedNs: Long,
+    val geometry: FrameGeometry,
+    val observation: Observation?,
+    val box: FaceBox?,
+    val background: Background?,
+    val pixels: SubjectPixels? = null,
+    val follower: SubjectOutline? = null,
+    val outline: SeenOutline? = null,
+    val shift: TrackedShift? = null,
+    val faces: List<FaceBox> = emptyList(),
+)
 
-internal class CompositionAnalyzer(context: Context, private val optics: CameraOptics, private val poses: CameraPose,
+internal class CompositionAnalyzer(
+    context: Context,
+    private val optics: CameraOptics,
+    private val poses: CameraPose,
+    private val mirrored: Boolean = false,
     private val modelFrameReady: (RequestToken, RecommendationFrame) -> Unit,
-    private val deliver: (SceneFrame) -> Unit) : ImageAnalysis.Analyzer, AutoCloseable {
+    private val deliver: (SceneFrame) -> Unit,
+) : ImageAnalysis.Analyzer, AutoCloseable {
     private val segmenter = SubjectSegmenter(context.applicationContext)
-    private val detector = FaceDetection.getClient(FaceDetectorOptions.Builder()
-        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).enableTracking().build())
+    private val detector = FaceDetection.getClient(
+        FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .enableTracking()
+            .build()
+    )
+    private val objectDetector = ObjectDetection.getClient(
+        ObjectDetectorOptions.Builder()
+            .setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE)
+            .enableMultipleObjects()
+            .build()
+    )
     private var reportedFailure = false
     val pendingFrame = PendingRecommendationFrame()
 
-    @Volatile var selected: SubjectOutline? = null
+    @Volatile var watchPerson = false
+    @Volatile var tracker: SubjectTracker? = null
     @Volatile var expectedZoom = 1f
 
     fun prepareSelection() = segmenter.prepare()
 
-    fun select(source: SceneFrame, subject: SelectedSubject): SubjectOutline? {
-        val observation = source.observation ?: return null
-        val pixels = source.pixels ?: return null
-        return SubjectOutline.from(observation, subject, pixels, segmenter::segment)
+    fun selectDiagnosed(source: SceneFrame, subject: SelectedSubject, allowBoxFallback: Boolean = false): OutlineAttempt {
+        val observation = source.observation ?: return OutlineAttempt(null, "NO_OBSERVATION")
+        val pixels = source.pixels ?: return OutlineAttempt(null, "NO_PIXELS")
+        return SubjectOutline.diagnose(observation, subject, pixels, segmenter::segment, allowBoxFallback)
+    }
+
+    private fun rectToFaceBox(bounds: Rect, frame: FrameGeometry): FaceBox? {
+        val size = frame.referenceSize
+        val a = frame.uprightToReference(Point(bounds.left.toFloat(), bounds.top.toFloat()))
+        val b = frame.uprightToReference(Point(bounds.right.toFloat(), bounds.bottom.toFloat()))
+        val box = FaceBox(
+            left = (minOf(a.x, b.x).toDouble() / size.width).coerceIn(0.0, 1.0),
+            top = (minOf(a.y, b.y).toDouble() / size.height).coerceIn(0.0, 1.0),
+            right = (maxOf(a.x, b.x).toDouble() / size.width).coerceIn(0.0, 1.0),
+            bottom = (maxOf(a.y, b.y).toDouble() / size.height).coerceIn(0.0, 1.0),
+        )
+        return box.takeIf { it.right > it.left && it.bottom > it.top }
     }
 
     @androidx.annotation.OptIn(ExperimentalGetImage::class)
@@ -56,9 +100,14 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
             val captured = optics.captureTimeNs(ts)
             val request = pendingFrame.forCapture(captured)
             val r = image.cropRect
-            val frame = FrameGeometry(Extent(image.width, image.height), Crop(r.left, r.top, r.right, r.bottom),
-                image.imageInfo.rotationDegrees)
+            val frame = FrameGeometry(
+                Extent(image.width, image.height),
+                Crop(r.left, r.top, r.right, r.bottom),
+                image.imageInfo.rotationDegrees,
+                mirrored,
+            )
             val empty = SceneFrame(ts, captured, frame, null, null, null)
+            var candidates: List<SubjectCandidate> = emptyList()
             val result = try {
                 val pose = poses.at(captured)
                 val lens = optics.lens(image, frame, expectedZoom)
@@ -66,32 +115,65 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
                 if (media == null || pose == null || lens == null ||
                     SystemClock.elapsedRealtimeNanos() - captured !in 0..RotationGuidance.FRESH_NS) empty else {
                     // The single CameraX analysis worker owns the proxy until ML Kit finishes.
-                    val follower = selected
-                    val detection = if (request != null || follower?.person != false)
-                        detector.process(InputImage.fromMediaImage(media, frame.rotation)) else null
+                    val activeTracker = tracker
+                    val input = if (request != null || watchPerson) InputImage.fromMediaImage(media, frame.rotation) else null
+                    val detection = input?.let { detector.process(it) }
+                    val objectDetection = if (request != null && input != null) objectDetector.process(input) else null
                     val pixels = try {
-                        if (request != null || follower != null) SubjectPixels.read(image, frame) else null
+                        when {
+                            request != null -> SubjectPixels.read(image, frame, targetHeight = 256)
+                            activeTracker != null -> SubjectPixels.read(image, frame, targetHeight = 128)
+                            else -> null
+                        }
                     } finally {
-                        // ML Kit owns the media image until its task completes, including on a pixel-read failure.
-                        if (detection != null) Tasks.await(detection)
+                        // ML Kit owns the media image until its tasks complete, including on a pixel-read failure.
+                        if (detection != null) runCatching { Tasks.await(detection) }
+                        if (objectDetection != null) runCatching { Tasks.await(objectDetection) }
                     }
-                    val face = detection?.result?.singleOrNull()
-                    val id = face?.trackingId
-                    val box = if (face != null && id != null) {
-                        val bounds = face.boundingBox
-                        val size = frame.referenceSize
-                        val p = frame.uprightToReference(Point(bounds.left.toFloat(), bounds.top.toFloat()))
-                        FaceBox(p.x.toDouble()/size.width, p.y.toDouble()/size.height,
-                            (p.x + bounds.width()).toDouble()/size.width, (p.y + bounds.height()).toDouble()/size.height)
-                    } else null
-                    val detected = box?.takeIf { it.right > it.left && it.bottom > it.top }?.let {
-                        val center = Uv((it.left + it.right)/2, (it.top + it.bottom)/2)
-                        if (center.x in 0.0..1.0 && center.y in 0.0..1.0) SubjectPosition(id!!, center, it.right - it.left) else null
+                    val rawFaces = detection?.takeIf { it.isSuccessful }?.result.orEmpty()
+                    val faceEntries = rawFaces.mapNotNull { f ->
+                        rectToFaceBox(f.boundingBox, frame)?.let { b -> f.trackingId to b }
+                    }
+                    val faceBoxes = faceEntries.map { it.second }
+                    val primaryBox = when {
+                        faceBoxes.size == 1 -> faceBoxes.first()
+                        faceBoxes.size >= 2 -> SubjectCandidates.unionOf(faceBoxes)
+                        else -> null
+                    }
+                    val detected = when {
+                        faceEntries.size == 1 -> {
+                            val (id, b) = faceEntries.first()
+                            val center = Uv((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0)
+                            if (id != null && center.x in 0.0..1.0 && center.y in 0.0..1.0) {
+                                SubjectPosition(id, center, b.right - b.left)
+                            } else null
+                        }
+                        faceBoxes.size >= 2 && primaryBox != null -> {
+                            val center = Uv((primaryBox.left + primaryBox.right) / 2.0, (primaryBox.top + primaryBox.bottom) / 2.0)
+                            if (center.x in 0.0..1.0 && center.y in 0.0..1.0) {
+                                SubjectPosition(0, center, primaryBox.right - primaryBox.left)
+                            } else null
+                        }
+                        else -> null
+                    }
+                    if (request != null) {
+                        val objectBoxes = objectDetection?.takeIf { it.isSuccessful }?.result.orEmpty()
+                            .mapNotNull { obj -> rectToFaceBox(obj.boundingBox, frame) }
+                        candidates = SubjectCandidates.build(faceBoxes, objectBoxes, request.tapUv)
                     }
                     val observation = Observation(captured, pose, lens, detected)
-                    val outline = if (follower != null && pixels != null) follower.observe(observation, pixels) else null
-                    val background = if (request != null || follower != null || detected != null) Background.read(image, frame) else null
-                    SceneFrame(ts, captured, frame, observation, box, background, pixels, follower, outline)
+                    val shift = if (activeTracker != null && pixels != null) activeTracker.track(observation, pixels) else null
+                    SceneFrame(
+                        sequence = ts,
+                        capturedNs = captured,
+                        geometry = frame,
+                        observation = observation,
+                        box = primaryBox,
+                        background = null,
+                        pixels = if (request != null) pixels else null,
+                        shift = shift,
+                        faces = faceBoxes,
+                    )
                 }
             } catch (e: Exception) {
                 if (!reportedFailure) Log.w("LumiCamera", "Composition observation unavailable", e)
@@ -102,7 +184,7 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
             if (request != null && result.pixels != null) {
                 val bitmap = try { image.toBitmap() } catch (_: RuntimeException) { return }
                 if (pendingFrame.claim(request, captured, SystemClock.elapsedRealtimeNanos())) {
-                    modelFrameReady(request, RecommendationFrame(result, bitmap))
+                    modelFrameReady(request, RecommendationFrame(result, bitmap, candidates, request.tapUv))
                 } else bitmap.recycle()
             }
         } finally {
@@ -113,6 +195,7 @@ internal class CompositionAnalyzer(context: Context, private val optics: CameraO
     override fun close() {
         pendingFrame.await(null)
         detector.close()
+        objectDetector.close()
         segmenter.close()
     }
 }

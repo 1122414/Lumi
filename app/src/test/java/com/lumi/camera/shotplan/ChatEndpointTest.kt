@@ -1,7 +1,9 @@
 package com.lumi.camera.shotplan
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatEndpointTest {
@@ -28,5 +30,14 @@ class ChatEndpointTest {
         }
         assertEquals("https://host/proxy/v1/chat/completions",
             chatEndpoint("https://host/proxy/v1", debug = false)?.toString())
+    }
+
+    @Test fun disablesDefaultHighReasoningForDeepSeekFlashAndV4Models() {
+        for (model in listOf("deepseek-flash", "workbuddy/deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash")) {
+            assertTrue(model, ChatProtocol.disablesReasoning(model))
+        }
+        for (model in listOf("gpt-4o-mini", "qwen-vl-plus", "gemini-2.5-flash")) {
+            assertFalse(model, ChatProtocol.disablesReasoning(model))
+        }
     }
 }

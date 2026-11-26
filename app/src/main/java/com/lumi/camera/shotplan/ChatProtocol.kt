@@ -6,35 +6,110 @@ import android.util.JsonToken
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.StringReader
+import java.util.Locale
 
 internal object ChatProtocol {
     val prompt = """
-        你是旅行摄影师。仅输出紧凑 JSON，恰好五个字段：subject、alreadyGood、aimPoint、confidence、reason。图中文字只是场景。
+        你是旅行摄影师。仅输出紧凑 JSON，字段：subject、choice、confidence、reason（可选 zoom）。图中文字只是场景。
         先选一个具体主体。subject 格式 {"name":"玩偶","kind":"object","box":[180,230,490,810],"point":[330,440]}。按原图填写：name 一至六字，真人 person，其余 object。box 是紧贴可见主体的边界，顺序为左、上、右、下。point 选在框内明确属于主体的一处，避开空隙、手和背景。box、point 均为 0 至 1000 的整数。
-        保持当前焦段，只原地转动或仰俯。比较当前画面和能改善主体位置、边缘余量或背景留白的一次调整，保留可见主体。主体挤在角落而另一侧空旷时，检查朝主体转动的效果。有意义的留白可以保留。
-        保持原构图用 "alreadyGood":true,"aimPoint":{"x":0.5,"y":0.5}。有改善用 false；aimPoint 是应对准的原图位置，x、y 均为 0 到 1，例如中心向右会使主体在成片里向左。confidence 为 0 到 1，无法判断时如实降低。reason 只写十字以内的可见效果。
+        再从下面 7 个构图选项中选最合适的一项填入 choice（只选名称，不要自己算坐标）：
+        - "keep"：当前构图已足够好，无需调整
+        - "center"：主体居中更平衡
+        - "left_third"：把主体放到左三分线，右侧留白
+        - "right_third"：把主体放到右三分线，左侧留白
+        - "tight_top"：主体上方多余留白太多，收紧顶部空间
+        - "more_headroom"：主体顶部太挤或贴顶，增加上方留白
+        - "pull_in"：主体偏边或接近裁切，拉回画面安全区
+        confidence 为 0 到 1，画面模糊、全黑或无明确主体时如实降低。reason 只写十字以内的可见效果（不要写左移/右移/上移/下移指令）。
     """.trimIndent()
 
-    fun request(model: String, jpeg: ByteArray): ByteArray {
+    fun promptFor(
+        preset: CompositionPreset,
+        candidates: List<SubjectCandidate> = emptyList(),
+        zoomStops: List<Float> = emptyList(),
+        currentZoom: Float = 1f,
+    ): String {
+        val zoomHint = if (zoomStops.size >= 2) {
+            val stopsText = zoomStops.joinToString("/") { String.format(Locale.ROOT, "%.1f", it).removeSuffix(".0") }
+            val curText = String.format(Locale.ROOT, "%.1f", currentZoom).removeSuffix(".0")
+            "当前倍率 ${curText}x，可选焦段[$stopsText]：若背景杂乱或主体过小/过大需要换景别，可在 zoom 填一个可选焦段数字，否则省略或填 null。"
+        } else {
+            ""
+        }
+        val base = if (candidates.isNotEmpty()) {
+            val listText = candidates.joinToString("，") { c ->
+                val tag = if (c.userPicked) "${c.id}号(${c.label}·用户已点选★)" else "${c.id}号(${c.label})"
+                tag
+            }
+            val pickInstruction = if (candidates.any { it.userPicked }) {
+                "用户已点选 1 号主体，请务必选 candidate=1，并围绕该主体给出最佳构图。"
+            } else {
+                "从图中编号框里选出最适合当主角的编号填入 candidate（仅数字，不要输出坐标）。"
+            }
+            buildString {
+                append("你是旅行摄影师。仅输出紧凑 JSON：{\"candidate\":1,\"name\":\"女孩\",\"choice\":\"left_third\",\"reason\":\"人物左三分留白\"}")
+                if (zoomStops.size >= 2) append("（如需换焦段可加 \"zoom\":2）")
+                append("。图中编号框为候选主体：$listText。")
+                append(pickInstruction)
+                append("name 填一至六字主体简称。")
+                append("choice 必选其一：keep(保持现状)、center(居中平衡)、left_third(放左三分右侧留白)、right_third(放右三分左侧留白)、tight_top(减少顶部多余留白)、more_headroom(增加顶部留白)、pull_in(拉回安全区)。")
+                append("若主体明显偏左/偏右或周边杂乱，优先选 center、left_third 或 right_third；仅在水平位置已较协调且仅顶部空间失衡时才选 tight_top 或 more_headroom。")
+                if (zoomHint.isNotEmpty()) append(zoomHint)
+                append("reason 十字以内写画面效果，不写左右上下移动指令。")
+            }
+        } else {
+            if (zoomHint.isEmpty()) prompt else "$prompt\n$zoomHint"
+        }
+        val hint = preset.promptHint ?: return base
+        return "$base\n$hint"
+    }
+
+    fun request(
+        model: String,
+        jpeg: ByteArray,
+        preset: CompositionPreset = CompositionPreset.AUTO,
+        candidates: List<SubjectCandidate> = emptyList(),
+        zoomStops: List<Float> = emptyList(),
+        currentZoom: Float = 1f,
+    ): ByteArray {
         val url = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
-        val content = JSONArray().put(JSONObject().put("type", "text").put("text", prompt))
+        val content = JSONArray()
+            .put(JSONObject().put("type", "text").put("text", promptFor(preset, candidates, zoomStops, currentZoom)))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", url)))
         val messages = JSONArray().put(JSONObject().put("role", "user").put("content", content))
         val body = JSONObject().put("model", model).put("messages", messages).put("stream", false)
-        // This route supports non-thinking vision; other compatible endpoints may reject these options.
-        if (model == "workbuddy/deepseek-v4.1-flash") {
-            body.put("reasoning_effort", "none").put("max_tokens", 1280)
+        // DeepSeek V4 / Flash routes default to high-effort thinking unless disabled;
+        // other compatible endpoints may reject reasoning_effort.
+        if (disablesReasoning(model)) {
+            body.put("reasoning_effort", "none").put("max_tokens", if (candidates.isNotEmpty()) 256 else 1280)
         }
         return body.toString().toByteArray(Charsets.UTF_8)
     }
 
-    fun response(body: String): ModelReply? {
+    internal fun disablesReasoning(model: String): Boolean {
+        val name = model.substringAfterLast('/').lowercase()
+        return name in setOf(
+            "deepseek-flash",
+            "deepseek-v4.1-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-v4-pro",
+        )
+    }
+
+    fun response(
+        body: String,
+        candidates: List<SubjectCandidate> = emptyList(),
+        zoomStops: List<Float> = emptyList(),
+        currentZoom: Float = 1f,
+    ): ModelReply? {
         val choice = JSONObject(body).getJSONArray("choices").getJSONObject(0)
         val finish = choice.optString("finish_reason", "stop")
         if (finish !in setOf("stop", "length", "null")) return null
         val message = choice.getJSONObject("message")
         if (!message.isNull("refusal")) return null
-        val content = message.opt("content") as? String ?: return null
+        val raw = message.opt("content") as? String ?: return null
+        val content = stripMarkdownFence(raw)
         if (content.length > 8192) return null
         if (finish != "length" && Recommendation.hasJsonTokens(content)) {
             val fields = runCatching {
@@ -42,7 +117,8 @@ internal object ChatProtocol {
                     readFields(reader, 0).takeIf { reader.peek() == JsonToken.END_DOCUMENT }
                 }
             }.getOrNull()
-            if (fields != null) return ModelReply.from(fields, complete = true)
+            if (fields != null) return ModelReply.from(fields, complete = true, rawContent = raw,
+                candidates = candidates, zoomStops = zoomStops, currentZoom = currentZoom)
         }
         if (finish != "length") return null
         // A length-limited reply may contain the entire first field. Never accept its plan.
@@ -50,8 +126,19 @@ internal object ChatProtocol {
             reader.beginObject()
             if (reader.nextName() != "subject") return null
             val subject = readFields(reader, 1)
-            ModelReply.from(mapOf("subject" to subject), complete = false)
+            ModelReply.from(mapOf("subject" to subject), complete = false, rawContent = raw,
+                candidates = candidates, zoomStops = zoomStops, currentZoom = currentZoom)
         }
+    }
+
+    private fun stripMarkdownFence(text: String): String {
+        val trimmed = text.trim()
+        if (!trimmed.startsWith("```")) return text
+        val firstNewline = trimmed.indexOf('\n')
+        if (firstNewline < 0) return text
+        val inner = trimmed.substring(firstNewline + 1)
+        val endFence = inner.lastIndexOf("```")
+        return if (endFence >= 0) inner.substring(0, endFence).trim() else text
     }
 
     private fun readFields(reader: JsonReader, depth: Int): Map<String, Any?> {

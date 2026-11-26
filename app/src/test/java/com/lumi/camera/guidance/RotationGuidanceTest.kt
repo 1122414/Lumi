@@ -393,4 +393,151 @@ class RotationGuidanceTest {
         for (ms in 450L..750L step 50) assertFalse(g.feed(sample(ms)).ready)
         assertTrue(g.feed(sample(800)).ready)
     }
+
+    @Test fun frontCameraProjectsMirroredScreenDirectionsAndLookAtConsistently() {
+        val frontLens = Lens(1.2, 0.9, 0.48, 0.52, front = true)
+        val frontTarget = Observation(0, origin, frontLens, face)
+        val deg = 12.0
+        val d = tan(Math.toRadians(deg))
+        // Front camera faces +Z: rotating +deg around +Y turns +Z toward +X (right),
+        // so a stationary target moves left on the mirrored preview.
+        val turnFrontRight = Pose(cos(Math.toRadians(deg) / 2), 0.0, sin(Math.toRadians(deg) / 2), 0.0)
+        // Rotating -deg around +X tilts +Z toward +Y (up), so the target moves down on screen.
+        val tiltFrontUp = Pose(cos(Math.toRadians(deg) / 2), -sin(Math.toRadians(deg) / 2), 0.0, 0.0)
+        val projRight = RotationProjection(frontTarget, frontTarget.copy(pose = turnFrontRight)).project(Uv(frontLens.cx, frontLens.cy))!!
+        assertEquals(frontLens.cx - frontLens.fx * d, projRight.x, 1e-6)
+        assertEquals(frontLens.cy, projRight.y, 1e-6)
+        val projUp = RotationProjection(frontTarget, frontTarget.copy(pose = tiltFrontUp)).project(Uv(frontLens.cx, frontLens.cy))!!
+        assertEquals(frontLens.cx, projUp.x, 1e-6)
+        assertEquals(frontLens.cy + frontLens.fy * d, projUp.y, 1e-6)
+
+        // lookAt rotates the target camera so aimPoint projects to Uv.CENTER in the goal view.
+        val aim = Uv(0.68, 0.34)
+        val aimedPose = origin * (frontLens.lookAt(aim) * frontLens.lookAt(Uv.CENTER).inverse())
+        val aimed = RotationProjection(frontTarget, frontTarget.copy(pose = aimedPose)).project(aim)!!
+        assertEquals(0.5, aimed.x, 1e-6)
+        assertEquals(0.5, aimed.y, 1e-6)
+
+        // Turning 100° right moves the target off the left edge and outsideView returns true.
+        val centeredTarget = Observation(0, origin, Lens(1.2, 0.9, 0.5, 0.5, front = true), face)
+        val farRight = Pose(cos(Math.toRadians(100.0) / 2), 0.0, sin(Math.toRadians(100.0) / 2), 0.0)
+        val farProjection = RotationProjection(centeredTarget, centeredTarget.copy(pose = farRight))
+        assertTrue(farProjection.outsideView(listOf(Uv(0.3, 0.2), Uv(0.7, 0.2), Uv(0.7, 0.8), Uv(0.3, 0.8))))
+        val edge = ReturnDirection(centeredTarget).display(Guide(null), null, farRight)
+        assertEquals(0.0, edge.ring!!.x, 1e-8)
+        assertEquals(0.5, edge.ring.y, 1e-6)
+
+        // Visual verification (measuredView) resolves the exact same front-camera ray.
+        val guidance = RotationGuidance(frontTarget, verifyScene = true)
+        val frame = Observation(50_000_000L, turnFrontRight, frontLens, face.copy(center = Uv(0.5, 0.5)))
+        val measured = guidance.update(frame, frame.timeNs, true)
+        assertEquals(0.5, measured.ring!!.x, 1e-6)
+        assertEquals(0.5, measured.ring.y, 1e-6)
+    }
+
+    @Test fun poseGuidanceTracksAttitudeZoomAndHoldWithoutVisualFlicker() {
+        val goalPose = origin * right(10.0)
+        val goal = Observation(0L, goalPose, lens, null)
+        val guidance = PoseGuidance(goal)
+
+        // Turning toward target monotonically decreases ring distance to center; overshooting flips side.
+        val d0 = guidance.update(origin, lens, 50_000_000L).ring!!.distance(Uv.CENTER)
+        val g5 = guidance.update(origin * right(5.0), lens, 150_000_000L)
+        assertTrue(g5.ring!!.distance(Uv.CENTER) < d0)
+        assertTrue(g5.ring.x > 0.5)
+        val g15 = guidance.update(origin * right(15.0), lens, 250_000_000L)
+        assertTrue(g15.ring!!.x < 0.5)
+
+        // Zooming 2x keeps the target active and projects with the zoomed focal length.
+        val zoomedLens = lens.copy(fx = lens.fx * 2.0, fy = lens.fy * 2.0)
+        val zGuide = PoseGuidance(goal).update(origin * right(6.0), zoomedLens, 50_000_000L)
+        assertEquals(0.5 + zoomedLens.fx * tan(Math.toRadians(4.0)), zGuide.ring!!.x, 1e-5)
+
+        // Turning 95° away sticks to the edge, turning back returns inside.
+        val away = guidance.update(origin * right(-95.0), lens, 400_000_000L)
+        assertTrue(away.offscreen)
+        assertEquals(1.0, away.ring!!.x, 1e-6)
+        assertFalse(away.ready)
+
+        // Fast sweep across goal does not become ready.
+        val sweep = PoseGuidance(goal)
+        assertFalse(sweep.update(goalPose * right(-3.0), lens, 100_000_000L).ready)
+        assertFalse(sweep.update(goalPose, lens, 150_000_000L).ready)
+        assertFalse(sweep.update(goalPose * right(3.0), lens, 200_000_000L).ready)
+
+        // Holding steady inside 2° for 600ms triggers ready; leaving revokes immediately.
+        val hold = PoseGuidance(goal)
+        var t = 1_000_000_000L
+        hold.update(goalPose * right(0.5), lens, t)
+        for (i in 1..11) {
+            t += 50_000_000L
+            assertFalse("not ready at ${i * 50}ms", hold.update(goalPose * right(0.5), lens, t).ready)
+        }
+        t += 100_000_000L
+        assertTrue(hold.update(goalPose * right(0.5), lens, t).ready)
+        // Dense 2ms UI ticks with 0.02° IMU noise must not break readiness.
+        for (i in 1..20) {
+            t += 2_000_000L
+            val jitter = if (i % 2 == 0) 0.52 else 0.50
+            assertTrue("still ready under sensor jitter at step $i", hold.update(goalPose * right(jitter), lens, t).ready)
+        }
+        assertFalse(hold.update(goalPose * right(3.0), lens, t + 50_000_000L).ready)
+    }
+
+    @Test fun personDriftWatchTriggersOnlyWhenPersonLeavesWhileExpectedInFrame() {
+        val watch = PersonDriftWatch(target)
+        // Turning camera 90° away so face isn't expected in view must not trigger drift.
+        val turnedAway = Observation(0L, right(90.0), lens, null)
+        assertFalse(watch.hasMoved(turnedAway, 1_000_000_000L))
+        assertFalse(watch.hasMoved(turnedAway, 2_500_000_000L))
+
+        // Face visible at predicted position stays ok.
+        assertFalse(watch.hasMoved(sample(3000, origin, Uv(0.52, 0.50)), 3_000_000_000L))
+        // Face drifted > 15% for >= 1s triggers moved.
+        assertFalse(watch.hasMoved(sample(3100, origin, Uv(0.75, 0.50)), 3_100_000_000L))
+        assertFalse(watch.hasMoved(sample(3900, origin, Uv(0.75, 0.50)), 3_900_000_000L))
+        assertTrue(watch.hasMoved(sample(4150, origin, Uv(0.75, 0.50)), 4_150_000_000L))
+    }
+
+    @Test fun horizonRollDetectsUprightTiltHidesOnFlatLayAndGatesReadiness() {
+        fun rollCcw(deg: Double): Pose {
+            val half = Math.toRadians(deg) / 2
+            return Pose(cos(half), 0.0, 0.0, sin(half))
+        }
+        // Flat on table (screen facing sky): horizon roll is undefined and returns null.
+        assertNull(origin.horizonRollDeg())
+
+        // Phone held vertically upright (+90° around X): horizon roll is 0°.
+        val upright = pitch(90.0)
+        assertEquals(0.0, upright.horizonRollDeg()!!, 1e-6)
+
+        // Tilting phone clockwise by 10° (right side drops): rollDeg = -10°.
+        assertEquals(-10.0, (upright * rollCcw(-10.0)).horizonRollDeg()!!, 1e-5)
+        // Tilting phone counter-clockwise by 10° (left side drops): rollDeg = +10°.
+        assertEquals(10.0, (upright * rollCcw(10.0)).horizonRollDeg()!!, 1e-5)
+
+        // Tilted upright phone (> 3.5° roll) must not report ready even when aim matches; leveling enables ready.
+        val tiltedGoal = Observation(0L, upright * rollCcw(6.0), lens, null)
+        val guidance = PoseGuidance(tiltedGoal)
+        var t = 1_000_000_000L
+        for (i in 0..16) {
+            t += 50_000_000L
+            val g = guidance.update(upright * rollCcw(6.0), lens, t)
+            assertFalse("crooked horizon must not be ready at step $i", g.ready)
+        }
+        val levelGoal = Observation(0L, upright, lens, null)
+        val levelGuidance = PoseGuidance(levelGoal)
+        for (i in 0..15) {
+            t += 50_000_000L
+            val g = levelGuidance.update(upright * rollCcw(1.0), lens, t)
+            if (i == 15) assertTrue("level upright hold should be ready", g.ready)
+        }
+
+        // Optical-axis elevation: upright = 0°, tilted down 30° = -30°, tilted up 30° = +30°, flat-lay = -90°.
+        assertEquals(0.0, upright.elevationDeg(), 1e-5)
+        assertEquals(-30.0, pitch(60.0).elevationDeg(), 1e-5)
+        assertEquals(30.0, pitch(120.0).elevationDeg(), 1e-5)
+        assertEquals(-90.0, origin.elevationDeg(), 1e-5)
+        assertEquals(PoseGuidance.READY_MAX_ROLL_DEG, PoseGuidance.LEVEL_GREEN_DEG, 1e-9)
+    }
 }

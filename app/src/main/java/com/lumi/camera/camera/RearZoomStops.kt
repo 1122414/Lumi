@@ -39,10 +39,11 @@ internal fun rearZoomStops(context: Context, camera: CameraInfo): List<Float> {
             scales += focalScales(physical)
         }
     }
-    return lensZoomStops(main.firstOrNull(), scales, Build.MODEL)
+    val rear = logical[C.LENS_FACING] == C.LENS_FACING_BACK
+    return lensZoomStops(main.firstOrNull(), scales, Build.MODEL, rear)
 }
 
-internal fun lensZoomStops(unitScale: Float?, scales: List<Float>, model: String): List<Float> {
+internal fun lensZoomStops(unitScale: Float?, scales: List<Float>, model: String, rear: Boolean = true): List<Float> {
     val stops = sortedSetOf(1f)
     if (unitScale == null || !unitScale.isFinite() || unitScale <= 0f) return stops.toList()
     for (scale in scales) {
@@ -50,6 +51,6 @@ internal fun lensZoomStops(unitScale: Float?, scales: List<Float>, model: String
         if (ratio.isFinite() && ratio > 0f) stops.add(ratio)
     }
     // The PKX110 stock photo dial also offers 4×; Camera2 exposes only its 1× and ~2× lenses.
-    if (model == "PKX110" && 2f in stops) stops.add(4f)
+    if (rear && model == "PKX110" && 2f in stops) stops.add(4f)
     return stops.toList()
 }

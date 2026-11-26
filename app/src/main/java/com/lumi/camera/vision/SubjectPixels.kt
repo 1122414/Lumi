@@ -28,9 +28,9 @@ internal class SubjectPixels(val width: Int, val height: Int, private val pixels
     }
 
     companion object {
-        fun read(image: ImageProxy, frame: FrameGeometry): SubjectPixels {
+        fun read(image: ImageProxy, frame: FrameGeometry, targetHeight: Int = 256): SubjectPixels {
             val ref = frame.referenceSize
-            val height = 256
+            val height = targetHeight.coerceIn(64, 256)
             val width = (height * ref.width / ref.height).coerceIn(48, 240)
             val planes = image.planes
             val y = planes[0]

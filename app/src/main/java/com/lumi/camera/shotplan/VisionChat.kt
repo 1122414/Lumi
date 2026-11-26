@@ -27,12 +27,19 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
         return ((remaining + 999_999L) / 1_000_000L).toInt()
     }
 
-    fun send(jpeg: ByteArray): ModelReply {
+    fun send(
+        jpeg: ByteArray,
+        preset: CompositionPreset = CompositionPreset.AUTO,
+        candidates: List<SubjectCandidate> = emptyList(),
+        zoomStops: List<Float> = emptyList(),
+        currentZoom: Float = 1f,
+    ): ModelReply {
         remainingMs()
-        val payload = ChatProtocol.request(config.model, jpeg)
+        val payload = ChatProtocol.request(config.model, jpeg, preset, candidates, zoomStops, currentZoom)
         val url = checkNotNull(chatEndpoint(config.address, BuildConfig.DEBUG))
         val conn = (if (url.protocol == "http") url.openConnection(Proxy.NO_PROXY) else url.openConnection()) as HttpURLConnection
         connection.set(conn)
+        var keepAlive = false
         try {
             conn.connectTimeout = remainingMs()
             conn.readTimeout = remainingMs()
@@ -41,12 +48,16 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
             conn.instanceFollowRedirects = false
             conn.useCaches = false
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            conn.setRequestProperty("Connection", "keep-alive")
             conn.setRequestProperty("Authorization", "Bearer " + config.apiKey)
             conn.setFixedLengthStreamingMode(payload.size)
             conn.outputStream.use { it.write(payload) }
             remainingMs()
             val code = conn.responseCode
-            if (code !in 200..299) throw ModelFailure(ConnectionResult.httpFailure(code), "推荐服务返回 HTTP $code，可以重新推荐。", code)
+            if (code !in 200..299) {
+                runCatching { conn.errorStream?.close() }
+                throw ModelFailure(ConnectionResult.httpFailure(code), "推荐服务返回 HTTP $code，可以重新推荐。", code)
+            }
             val body = conn.inputStream.use { input ->
                 val out = ByteArrayOutputStream()
                 val buf = ByteArray(4096)
@@ -59,11 +70,13 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
                 }
                 out.toString("UTF-8")
             }
-            return try { ChatProtocol.response(body) } catch (_: Exception) { null }
-                ?: throw ModelFailure(ConnectionResult.FORMAT, "模型未返回可识别的主体，请重新推荐。")
+            // Fully reading and closing inputStream lets Android's HttpURLConnection pool reuse the TLS socket.
+            keepAlive = !cancelled
+            return try { ChatProtocol.response(body, candidates, zoomStops, currentZoom) } catch (_: Exception) { null }
+                ?: throw ModelFailure(ConnectionResult.FORMAT, "模型未返回可识别的主体，请重新推荐。", rawReply = body.take(1500))
         } finally {
             connection.compareAndSet(conn, null)
-            conn.disconnect()
+            if (!keepAlive) conn.disconnect()
         }
     }
 }

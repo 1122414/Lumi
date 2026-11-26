@@ -28,4 +28,5 @@ internal enum class ConnectionResult(val label: String) {
     }
 }
 
-internal class ModelFailure(val kind: ConnectionResult, val notice: String, val httpCode: Int? = null) : Exception()
+internal class ModelFailure(val kind: ConnectionResult, val notice: String, val httpCode: Int? = null,
+    val rawReply: String? = null) : Exception()

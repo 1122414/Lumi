@@ -176,4 +176,56 @@ class RecommendationTest {
         val slow = requests.begin(10_000_000)
         assertEquals(RecommendationRequests.Completion.EXPIRED, requests.finish(slow, slow.deadlineNs))
     }
+
+    @Test fun semanticCompositionChoicesAlwaysMoveTheSubjectInTheRequestedDirection() {
+        // Plush toy slightly low in frame (y: 0.30..0.78), with extra headroom on top.
+        val lowToy = FaceBox(0.32, 0.30, 0.68, 0.78)
+        val tightTop = CompositionChoice.aimPointFor(lowToy, CompositionChoice.TIGHT_TOP)
+        // To reduce top headroom, the toy must move UP (smaller y), so the camera must tilt DOWN (aimPoint.y > 0.5)!
+        assertTrue("tight_top must aim below center to reduce top headroom, got $tightTop", tightTop.y > 0.55)
+        assertEquals(0.5, tightTop.x, 1e-6)
+
+        // Toy near top edge (y: 0.06..0.52): more_headroom must tilt UP (aimPoint.y < 0.5).
+        val highToy = FaceBox(0.32, 0.06, 0.68, 0.52)
+        val moreHeadroom = CompositionChoice.aimPointFor(highToy, CompositionChoice.MORE_HEADROOM)
+        assertTrue("more_headroom must aim above center, got $moreHeadroom", moreHeadroom.y < 0.45)
+
+        // Left-third places subject left of center => camera aims RIGHT (aimPoint.x > 0.5).
+        val centeredToy = FaceBox(0.38, 0.32, 0.62, 0.68)
+        val leftThird = CompositionChoice.aimPointFor(centeredToy, CompositionChoice.LEFT_THIRD)
+        assertTrue("left_third must aim right of center, got $leftThird", leftThird.x > 0.55)
+
+        // Right-third places subject right of center => camera aims LEFT (aimPoint.x < 0.5).
+        val rightThird = CompositionChoice.aimPointFor(centeredToy, CompositionChoice.RIGHT_THIRD)
+        assertTrue("right_third must aim left of center, got $rightThird", rightThird.x < 0.45)
+
+        // Off-center subject with pull_in or center returns towards center.
+        val edgeToy = FaceBox(0.70, 0.12, 0.96, 0.50)
+        val pullIn = CompositionChoice.aimPointFor(edgeToy, CompositionChoice.PULL_IN)
+        assertTrue("pull_in must aim toward right edge to pull toy back in, got $pullIn", pullIn.x > 0.65)
+        assertTrue("pull_in must aim above center to bring high toy down, got $pullIn", pullIn.y < 0.42)
+
+        assertEquals(Uv.CENTER, CompositionChoice.aimPointFor(lowToy, CompositionChoice.KEEP))
+
+        // Full 4-field choice JSON parses and updates aimPoint when measured bounds arrive.
+        val compactSubject = mapOf("name" to "玩偶", "kind" to "object",
+            "box" to listOf(320, 300, 680, 780), "point" to listOf(500, 540))
+        val reply = ModelReply.from(mapOf(
+            "subject" to compactSubject,
+            "choice" to "tight_top",
+            "confidence" to 0.88,
+            "reason" to "减少上方留白",
+        ), complete = true)!!
+        val plan = reply.plan!!
+        assertEquals(CompositionChoice.TIGHT_TOP, plan.choice)
+        assertFalse(plan.alreadyGood)
+        assertTrue("tight_top plan aimPoint.y=${plan.aimPoint.y}", plan.aimPoint.y > 0.55)
+        val updated = plan.withMeasuredBounds(FaceBox(0.30, 0.36, 0.70, 0.82))
+        assertTrue("measured lower bounds need stronger tilt down", updated.aimPoint.y > plan.aimPoint.y)
+
+        // Far-left subject with tight_top must also pull horizontally off the edge toward left-third (0.34).
+        val farLeftBottle = FaceBox(0.11, 0.19, 0.33, 0.72)
+        val pulledAim = CompositionChoice.aimPointFor(farLeftBottle, CompositionChoice.TIGHT_TOP)
+        assertTrue("far-left tight_top should aim left (x < 0.45) to move bottle right off edge, got $pulledAim", pulledAim.x < 0.45)
+    }
 }

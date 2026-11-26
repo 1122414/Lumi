@@ -16,6 +16,7 @@ import android.os.SystemClock
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo
+import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageProxy
 import com.lumi.camera.guidance.Lens
 import com.lumi.camera.guidance.Pose
@@ -58,6 +59,7 @@ internal class CameraPose(context: Context, private val displayRotation: Int) : 
 
 @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
 internal class CameraOptics(info: CameraInfo, private val readings: FocalReadings) {
+    private val front = info.lensFacing == CameraSelector.LENS_FACING_FRONT
     private val meta = Camera2CameraInfo.from(info)
     private val focals = meta.getCameraCharacteristic(C.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
     private val physical = meta.getCameraCharacteristic(C.SENSOR_INFO_PHYSICAL_SIZE)
@@ -90,7 +92,7 @@ internal class CameraOptics(info: CameraInfo, private val readings: FocalReading
         val swap = geometry.rotation % 180 != 0
         return Lens((if (swap) fy else fx).toDouble() / ref.width,
             (if (swap) fx else fy).toDouble() / ref.height,
-            principal.x.toDouble() / ref.width, principal.y.toDouble() / ref.height)
+            principal.x.toDouble() / ref.width, principal.y.toDouble() / ref.height, front)
             .takeIf { it.fx > 0 && it.fy > 0 && it.cx in 0.0..1.0 && it.cy in 0.0..1.0 }
     }
 }
@@ -101,6 +103,11 @@ internal class FocalReadings : CameraCaptureSession.CaptureCallback() {
     private data class Reading(val mm: Float?, val zoom: Float?, val crop: Rect?)
     private val values = LinkedHashMap<Long, Reading>()
     private var unitFocal: Float? = null
+
+    @Synchronized fun reset() {
+        values.clear()
+        unitFocal = null
+    }
 
     @Synchronized override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest,
         result: TotalCaptureResult) {
@@ -115,7 +122,7 @@ internal class FocalReadings : CameraCaptureSession.CaptureCallback() {
         val applied = frame.zoom?.takeIf { ratioControl } ?: frame.crop?.let { crop ->
             minOf(active.width().toFloat()/crop.width(), active.height().toFloat()/crop.height())
         } ?: 1f
-        if (abs(applied-1f) < 0.001f && frame.mm != null) unitFocal = frame.mm
+        if (abs(applied-1f) < 0.01f && frame.mm != null) unitFocal = frame.mm
         return zoomedFocal(unitFocal ?: singleFocal, applied, requested)
     }
 }
@@ -123,6 +130,6 @@ internal class FocalReadings : CameraCaptureSession.CaptureCallback() {
 internal fun zoomedFocal(unitFocal: Float?, applied: Float, requested: Float): Float? {
     if (unitFocal == null || !unitFocal.isFinite() || unitFocal <= 0 || !requested.isFinite() || requested <= 0 ||
         !applied.isFinite() || applied <= 0 ||
-        abs(applied-requested) > requested*0.005f) return null
+        abs(applied-requested) > maxOf(requested*0.03f, 0.02f)) return null
     return unitFocal * applied
 }

@@ -4,8 +4,12 @@ import com.lumi.camera.camera.Crop
 import com.lumi.camera.camera.Extent
 import com.lumi.camera.camera.FrameGeometry
 import com.lumi.camera.guidance.*
+import com.lumi.camera.shotplan.ChatProtocol
+import com.lumi.camera.shotplan.CompositionChoice
+import com.lumi.camera.shotplan.CompositionPreset
 import com.lumi.camera.shotplan.PlanProblem
 import com.lumi.camera.shotplan.PlanResult
+import com.lumi.camera.shotplan.PresetSelection
 import com.lumi.camera.shotplan.validatedPlan
 import com.lumi.camera.shotplan.RememberedComposition
 import com.lumi.camera.shotplan.SelectedSubject
@@ -274,5 +278,143 @@ class SubjectOutlineTest {
             fields + ("outline" to vertices.toMutableList().apply { set(1, vertices[8]); set(8, vertices[1]) }))) {
             assertNull(SelectedSubject.parse(bad))
         }
+    }
+
+    @Test fun fallbackInteriorSeedRecoversWhenModelPointLandsOnBackgroundGap() {
+        // Point (365, 250) falls in the notch between the rabbit's ears (background), while box covers the toy.
+        val offSeed = SelectedSubject.parse(mapOf("name" to "玩偶", "kind" to "object",
+            "box" to listOf(220, 220, 510, 685), "point" to listOf(365, 250)))!!
+        val attempt = SubjectOutline.diagnose(source, offSeed, image(), segment)
+        assertNotNull(attempt.outline)
+        assertTrue(attempt.status.startsWith("OK_FALLBACK_SEED"))
+    }
+
+    @Test fun multiPartToyMergesUpperAndLowerHalvesInsideTheModelBox() {
+        val w = 120
+        val h = 160
+        // Upper head (color A) and lower body (color B) separated by a 1px seam inside the box.
+        val pixels = SubjectPixels(w, h, IntArray(w * h) { i ->
+            val x = i % w
+            val y = i / w
+            when {
+                x in 36..84 && y in 36..76 -> 0xeeaa44
+                x in 38..82 && y in 78..122 -> 0x445566
+                else -> 0xdddddd
+            }
+        })
+        val twoPartSegment: SegmentAt = { img, seed ->
+            val seedColor = img.at(seed.x, seed.y)
+            val mask = ByteArray(img.width * img.height) { i ->
+                val c = img.at((i % img.width + 0.5) / img.width, (i / img.width + 0.5) / img.height)
+                if (c != 0xdddddd && c == seedColor) 0 else 255.toByte()
+            }
+            ForegroundMask.at(img.width, img.height, mask, seed)
+        }
+        val boxSubject = SelectedSubject.parse(mapOf("name" to "玩偶", "kind" to "object",
+            "box" to listOf(280, 210, 720, 790), "point" to listOf(500, 340)))!!
+        val attempt = SubjectOutline.diagnose(source, boxSubject, pixels, twoPartSegment)
+        val outline = attempt.outline!!
+        assertTrue("merged outline should reach lower body, bottom=${outline.bounds.bottom}", outline.bounds.bottom > 0.72)
+        assertTrue("merged outline should include upper head, top=${outline.bounds.top}", outline.bounds.top < 0.25)
+    }
+
+    @Test fun lightweightSubjectTrackerFollowsTranslationRotationAndZoom() {
+        val pixels0 = image()
+        val outline = SubjectOutline.from(source, toy, pixels0, segment)!!
+        val tracker = SubjectTracker.from(outline, pixels0)!!
+        // Move the toy right by +0.08, down by -0.05 while rotating camera slightly and zooming to 1.5x.
+        val halfAngle = Math.toRadians(2.0) / 2
+        val zoomedObs = source.copy(
+            timeNs = 60_000_000L,
+            pose = Pose(cos(halfAngle), 0.0, -sin(halfAngle), 0.0),
+            lens = source.lens.copy(fx = source.lens.fx * 1.5, fy = source.lens.fy * 1.5),
+        )
+        val movedPixels = image(dx = 0.08, dy = -0.05, pose = zoomedObs)
+        val shift = tracker.track(zoomedObs, movedPixels)
+        assertTrue("tracker should match moved subject", shift.matched)
+        val proj = RotationProjection(source, zoomedObs)
+        val expectedCenter = proj.project(Uv(0.365 + 0.08, 0.453 - 0.05))!!
+        val baseProjected = proj.project(Uv(0.365, 0.453))!!
+        val trackedCenter = Uv(baseProjected.x + shift.dx, baseProjected.y + shift.dy)
+        assertEquals(expectedCenter.x, trackedCenter.x, 0.025)
+        assertEquals(expectedCenter.y, trackedCenter.y, 0.025)
+
+        // Removing the toy completely causes matched = false.
+        val removed = tracker.track(zoomedObs.copy(timeNs = 120_000_000L), image(covered = true, pose = zoomedObs))
+        assertFalse("removed subject must not match background", removed.matched)
+
+        // Bringing the toy back far away on the right side triggers full-frame re-acquisition.
+        val farMoved = image(dx = 0.42, dy = 0.0, pose = source)
+        val reacquired = tracker.track(source.copy(timeNs = 180_000_000L), farMoved)
+        assertTrue("re-entering subject should be re-acquired", reacquired.matched)
+        assertEquals(0.42, reacquired.dx, 0.03)
+    }
+
+    @Test fun greenGuidanceRingFollowsMovedSubjectAndAdaptsOnZoom() {
+        val pixels0 = image()
+        val geometry = FrameGeometry(Extent(120, 160), Crop(0, 0, 120, 160), 0)
+        val frame = SceneFrame(1, 0, geometry, source, null, Background(IntArray(40 * 52)), pixels0)
+        // Toy sits left-of-center (~0.365) and model chooses keep.
+        val plan = validatedPlan(mapOf(
+            "subject" to fields,
+            "choice" to "keep",
+            "confidence" to 0.9,
+            "reason" to "玩偶突出",
+        ))!!
+        val outline = SubjectOutline.from(source, toy, pixels0, segment)!!
+        val remembered = (RememberedComposition.recommended(frame, plan, outline) as PlanResult.Accepted).value
+        val guidance = PoseGuidance(remembered.observation)
+
+        // 1. Move the toy right by +0.20 while phone stays still: green ring must shift right to follow!
+        val shiftRight = TrackedShift(dx = 0.20, dy = 0.0, lens = source.lens, timeNs = 50_000_000L, matched = true)
+        val liveTargetMoved = remembered.targetFor(source.pose, source.lens, shiftRight)
+        val guideMoved = guidance.update(source.pose, source.lens, 50_000_000L, liveTargetMoved)
+        assertNotNull(guideMoved.ring)
+        assertTrue("green ring must move right when subject moves right, got ${guideMoved.ring}", guideMoved.ring!!.x > 0.65)
+        assertFalse(guideMoved.ready)
+
+        // 2. Zoom to 2x with the toy still on the left (dx = 0): at 2x the off-center toy shifts toward the left edge,
+        // so the green ring must point left to keep the zoomed-in toy safely inside the frame!
+        val zoomedLens = source.lens.copy(fx = source.lens.fx * 2.0, fy = source.lens.fy * 2.0)
+        val liveTargetZoomed = remembered.targetFor(source.pose, zoomedLens, shift = null)
+        val guideZoomed = PoseGuidance(remembered.observation).update(source.pose, zoomedLens, 100_000_000L, liveTargetZoomed)
+        assertNotNull(guideZoomed.ring)
+        assertTrue("zooming to 2x on a left-side subject must pull aim left, got ${guideZoomed.ring}", guideZoomed.ring!!.x < 0.42)
+    }
+
+    @Test fun switchingCompositionPresetsLocallyRecalculatesGreenRingAndRestoresAuto() {
+        val pixels0 = image()
+        val geometry = FrameGeometry(Extent(120, 160), Crop(0, 0, 120, 160), 0)
+        val frame = SceneFrame(1, 0, geometry, source, null, Background(IntArray(40 * 52)), pixels0)
+        // Toy sits left-of-center (~0.365, ~0.453); initial model choice is keep.
+        val plan = validatedPlan(mapOf(
+            "subject" to fields,
+            "choice" to "keep",
+            "confidence" to 0.9,
+            "reason" to "玩偶突出",
+        ))!!
+        val outline = SubjectOutline.from(source, toy, pixels0, segment)!!
+        val base = (RememberedComposition.recommended(frame, plan, outline) as PlanResult.Accepted).value
+
+        // Switching to SYMMETRY (center) on a left-side toy must aim LEFT (ring.x < 0.44) to bring toy to center.
+        val centered = base.withPreset(PresetSelection(CompositionPreset.SYMMETRY), source.pose, source.lens, null)
+        val centerGuide = PoseGuidance(centered.observation).update(source.pose, source.lens, 50_000_000L, centered.targetFor(source.pose, source.lens, null))
+        assertTrue("symmetry preset should pull left-side toy toward center, ring=${centerGuide.ring}", centerGuide.ring!!.x < 0.42)
+
+        // Switching to RIGHT_THIRD must aim even further LEFT than SYMMETRY.
+        val rightThird = centered.withPreset(PresetSelection(CompositionPreset.RULE_OF_THIRDS, CompositionChoice.RIGHT_THIRD), source.pose, source.lens, null)
+        val rightGuide = PoseGuidance(rightThird.observation).update(source.pose, source.lens, 100_000_000L, rightThird.targetFor(source.pose, source.lens, null))
+        assertTrue("right third should aim further left than center, right=${rightGuide.ring} center=${centerGuide.ring}", rightGuide.ring!!.x < centerGuide.ring!!.x - 0.05)
+
+        // Switching back to AUTO restores the original KEEP choice (ring back at center 0.5).
+        val restored = rightThird.withPreset(PresetSelection(CompositionPreset.AUTO), source.pose, source.lens, null)
+        val restoredGuide = PoseGuidance(restored.observation).update(source.pose, source.lens, 150_000_000L, restored.targetFor(source.pose, source.lens, null))
+        assertEquals(0.5, restoredGuide.ring!!.x, 0.02)
+        assertEquals(0.5, restoredGuide.ring!!.y, 0.02)
+
+        // Non-AUTO presets append framing guidance to ChatProtocol prompt; AUTO keeps default prompt unchanged.
+        assertEquals(ChatProtocol.prompt, ChatProtocol.promptFor(CompositionPreset.AUTO))
+        assertTrue(ChatProtocol.promptFor(CompositionPreset.RULE_OF_THIRDS).contains("left_third"))
+        assertTrue(ChatProtocol.promptFor(CompositionPreset.SYMMETRY).contains("center"))
     }
 }

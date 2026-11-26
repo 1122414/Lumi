@@ -26,15 +26,40 @@ internal data class Pose(val w: Double, val x: Double, val y: Double, val z: Dou
     }
     fun degreesTo(other: Pose) = Math.toDegrees(2 * acos(abs(w*other.w + x*other.x +
         y*other.y + z*other.z).coerceIn(0.0, 1.0)))
+
+    // Camera optical-axis elevation relative to the horizontal plane (degrees, -90° down to +90° up).
+    fun elevationDeg(front: Boolean = false): Double {
+        val zOut = 1.0 - 2.0 * (x * x + y * y)
+        val forwardZ = (if (front) zOut else -zOut).coerceIn(-1.0, 1.0)
+        return Math.toDegrees(kotlin.math.asin(forwardZ))
+    }
+
+    // Horizon tilt in upright screen coordinates (degrees).
+    // Returns null when the phone is pitched steeply toward the floor or sky (> ~55°),
+    // where a horizontal level line is undefined (e.g. flat-lay food or sky shots).
+    fun horizonRollDeg(): Double? {
+        // World +Z (sky/up) transformed into upright display axes via q^-1 * (0, 0, 1) * q.
+        val ux = 2.0 * (x * z - w * y)
+        val uy = 2.0 * (y * z + w * x)
+        val uz = 1.0 - 2.0 * (x * x + y * y)
+        if (abs(uz) > FLAT_PITCH_COS || hypot(ux, uy) < 0.15) return null
+        return Math.toDegrees(atan2(ux, uy))
+    }
+
+    private companion object {
+        // sin(55°) ≈ 0.819: hides level when camera is pitched more than ~55° up or down.
+        const val FLAT_PITCH_COS = 0.82
+    }
 }
 
 // Focal lengths and principal point in normalized upright ViewPort coordinates.
-internal data class Lens(val fx: Double, val fy: Double, val cx: Double, val cy: Double) {
+internal data class Lens(val fx: Double, val fy: Double, val cx: Double, val cy: Double, val front: Boolean = false) {
     fun lookAt(point: Uv): Pose {
         val x = (point.x - cx) / fx
         val y = (cy - point.y) / fy
-        val yaw = -atan2(x, 1.0) / 2
-        val pitch = atan2(y, hypot(x, 1.0)) / 2
+        val sign = if (front) -1.0 else 1.0
+        val yaw = -sign * atan2(x, 1.0) / 2
+        val pitch = sign * atan2(y, hypot(x, 1.0)) / 2
         return Pose(cos(yaw), 0.0, sin(yaw), 0.0) * Pose(cos(pitch), sin(pitch), 0.0, 0.0)
     }
 }
@@ -47,28 +72,30 @@ internal class RotationProjection(target: Observation, current: Observation) {
     private val b = current.lens
     private val rotation = current.pose.inverse() * target.pose
     private fun rayInCurrentView(point: Uv): Pose {
-        val ray = Pose(0.0, (point.x - a.cx) / a.fx, (a.cy - point.y) / a.fy, -1.0)
+        val ray = Pose(0.0, (point.x - a.cx) / a.fx, (a.cy - point.y) / a.fy, if (a.front) 1.0 else -1.0)
         return rotation * ray * rotation.inverse()
     }
 
     fun project(point: Uv): Uv? {
         val v = rayInCurrentView(point)
-        if (v.z >= -0.05) return null
-        return Uv(b.cx + b.fx * v.x / -v.z, b.cy - b.fy * v.y / -v.z)
+        val depth = if (b.front) v.z else -v.z
+        if (depth <= 0.05) return null
+        return Uv(b.cx + b.fx * v.x / depth, b.cy - b.fy * v.y / depth)
     }
 
     fun outsideView(corners: List<Uv>): Boolean {
         // Corners can straddle the camera plane at a side-on angle. Test clipping
         // before dividing by depth so the behind-camera corners still participate.
         val rays = corners.map(::rayInCurrentView)
-        return rays.isNotEmpty() && (rays.all { it.z >= 0 } ||
-            rays.all { b.fx*it.x < b.cx*it.z } || rays.all { b.fx*it.x > (b.cx-1)*it.z } ||
-            rays.all { -b.fy*it.y < b.cy*it.z } || rays.all { -b.fy*it.y > (b.cy-1)*it.z })
+        val sign = if (b.front) -1.0 else 1.0
+        return rays.isNotEmpty() && (rays.all { sign * it.z >= 0 } ||
+            rays.all { b.fx*it.x < b.cx*sign*it.z } || rays.all { b.fx*it.x > (b.cx-1)*sign*it.z } ||
+            rays.all { -b.fy*it.y < b.cy*sign*it.z } || rays.all { -b.fy*it.y > (b.cy-1)*sign*it.z })
     }
 
     fun onView(point: Uv, previousEdge: Uv): Uv {
         val v = rayInCurrentView(point)
-        val depth = -v.z
+        val depth = if (b.front) v.z else -v.z
         val dx = b.fx * v.x + (b.cx - 0.5) * depth
         val dy = -b.fy * v.y + (b.cy - 0.5) * depth
         val extent = maxOf(abs(dx), abs(dy))
@@ -285,5 +312,130 @@ internal class RotationGuidance(private val target: Observation, private val ver
         private const val FACE_GAP_NS = 200_000_000L
         private const val CORRECTION_NS = 90_000_000.0
         private const val MERGED_DISPLAY_NS = 550_000_000L
+    }
+}
+
+internal data class PoseGuide(
+    val ring: Uv?,
+    val ready: Boolean = false,
+    val offscreen: Boolean = false,
+    val angleDeg: Double = Double.POSITIVE_INFINITY,
+    val rollDeg: Double? = null,
+)
+
+// Pure attitude + live-lens guidance (M3.1).
+// Display ring uses light exponential smoothing; readiness depends only on raw attitude & angular velocity.
+internal class PoseGuidance(private val target: Observation) {
+    private var previousEdge = Uv(1.0, 0.5)
+    private var lastDisplayNs: Long? = null
+    private var smoothedRing: Uv? = null
+    private var lastRelativePose: Pose? = null
+    private var lastPoseNs: Long? = null
+    private var holdSinceNs: Long? = null
+    private var lastGuide: PoseGuide? = null
+
+    fun resetHold() {
+        holdSinceNs = null
+        smoothedRing = null
+        lastRelativePose = null
+        lastPoseNs = null
+    }
+
+    fun update(livePose: Pose, liveLens: Lens, nowNs: Long, activeTarget: Observation = target): PoseGuide {
+        val lastNs = lastDisplayNs
+        if (lastNs != null && nowNs <= lastNs) {
+            return lastGuide ?: PoseGuide(null)
+        }
+        val live = activeTarget.copy(timeNs = nowNs, pose = livePose, lens = liveLens)
+        val projection = RotationProjection(activeTarget, live)
+        val raw = projection.onView(Uv.CENTER, previousEdge)
+        val offscreen = maxOf(abs(raw.x - 0.5), abs(raw.y - 0.5)) >= 0.499999
+        if (offscreen) previousEdge = raw
+
+        val angle = livePose.degreesTo(activeTarget.pose)
+        val relativePose = livePose.inverse() * activeTarget.pose
+        val prevRel = lastRelativePose
+        val prevNs = lastPoseNs
+        var still = true
+        if (prevRel == null || prevNs == null) {
+            lastRelativePose = relativePose
+            lastPoseNs = nowNs
+            still = false
+        } else {
+            val dtNs = nowNs - prevNs
+            if (dtNs > MAX_SAMPLE_GAP_NS) {
+                lastRelativePose = relativePose
+                lastPoseNs = nowNs
+                still = false
+            } else if (dtNs >= VELOCITY_WINDOW_NS) {
+                still = prevRel.degreesTo(relativePose) <= READY_MAX_DEG_PER_SEC * dtNs / 1e9
+                lastRelativePose = relativePose
+                lastPoseNs = nowNs
+            }
+        }
+
+        val rollDeg = livePose.horizonRollDeg()
+        val rollOk = rollDeg == null || abs(rollDeg) <= READY_MAX_ROLL_DEG
+        if (angle <= READY_ANGLE_DEG && rollOk) {
+            if (holdSinceNs == null || !still) holdSinceNs = nowNs
+        } else {
+            holdSinceNs = null
+        }
+        val ready = holdSinceNs?.let { nowNs - it >= READY_HOLD_NS } == true
+
+        val prevRing = smoothedRing
+        val smoothDt = lastDisplayNs?.let { nowNs - it } ?: 0L
+        val display = when {
+            ready -> Uv.CENTER
+            prevRing == null || offscreen || smoothDt !in 1..MAX_SAMPLE_GAP_NS || prevRing.distance(raw) > 0.15 -> raw
+            else -> {
+                val weight = 1.0 - exp(-smoothDt / SMOOTH_TIME_CONSTANT_NS)
+                Uv(prevRing.x + weight * (raw.x - prevRing.x), prevRing.y + weight * (raw.y - prevRing.y))
+            }
+        }
+        smoothedRing = display
+        lastDisplayNs = nowNs
+        return PoseGuide(display, ready = ready, offscreen = offscreen, angleDeg = angle, rollDeg = rollDeg).also { lastGuide = it }
+    }
+
+    companion object {
+        // Temporary thresholds to be calibrated on real hardware.
+        const val READY_ANGLE_DEG = 2.0
+        const val READY_MAX_ROLL_DEG = 2.5
+        const val LEVEL_GREEN_DEG = 2.5
+        const val READY_HOLD_NS = 600_000_000L
+        const val READY_MAX_DEG_PER_SEC = 8.0
+        private const val MAX_SAMPLE_GAP_NS = 250_000_000L
+        private const val VELOCITY_WINDOW_NS = 50_000_000L
+        private const val SMOOTH_TIME_CONSTANT_NS = 80_000_000.0
+    }
+}
+
+// Low-frequency check for whether a human subject walked away while expected inside the view.
+internal class PersonDriftWatch(private val source: Observation) {
+    private val subject = source.subject
+    private var badSinceNs: Long? = null
+
+    fun hasMoved(current: Observation, nowNs: Long): Boolean {
+        val anchor = subject ?: return false
+        val predicted = RotationProjection(source, current).project(anchor.center)
+        // If the camera itself turned/zoomed away so the person isn't expected in frame, don't cancel guidance.
+        if (predicted == null || predicted.x !in 0.05..0.95 || predicted.y !in 0.05..0.95) {
+            badSinceNs = null
+            return false
+        }
+        val seen = current.subject
+        val ok = seen != null && seen.center.distance(predicted) <= MAX_DRIFT_FRACTION
+        if (ok) {
+            badSinceNs = null
+            return false
+        }
+        val start = badSinceNs ?: nowNs.also { badSinceNs = it }
+        return nowNs - start >= DRIFT_TIMEOUT_NS
+    }
+
+    companion object {
+        const val MAX_DRIFT_FRACTION = 0.15
+        const val DRIFT_TIMEOUT_NS = 1_000_000_000L
     }
 }

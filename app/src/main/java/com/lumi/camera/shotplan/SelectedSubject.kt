@@ -20,6 +20,19 @@ internal class SelectedSubject private constructor(val name: String, val person:
     companion object {
         const val MAX_VERTICES = 128
 
+        fun fromBox(name: String, person: Boolean, box: FaceBox, seed: Uv): SelectedSubject =
+            SelectedSubject(
+                name = name,
+                person = person,
+                outline = listOf(
+                    Uv(box.left, box.top),
+                    Uv(box.right, box.top),
+                    Uv(box.right, box.bottom),
+                    Uv(box.left, box.bottom),
+                ),
+                seed = seed,
+            )
+
         fun nameOf(raw: Any?): String? {
             val name = ((raw as? Map<*, *>)?.get("name") as? String)?.trim() ?: return null
             return name.takeIf { it.codePointCount(0, it.length) in 1..6 && it.all(Char::isLetterOrDigit) &&

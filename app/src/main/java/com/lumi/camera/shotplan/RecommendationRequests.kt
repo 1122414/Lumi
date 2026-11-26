@@ -1,9 +1,10 @@
 package com.lumi.camera.shotplan
 
 import com.lumi.camera.guidance.RotationGuidance
+import com.lumi.camera.guidance.Uv
 import java.util.concurrent.atomic.AtomicReference
 
-internal data class RequestToken(val id: Long, val startedNs: Long, val deadlineNs: Long, val config: ModelConfig)
+internal data class RequestToken(val id: Long, val startedNs: Long, val deadlineNs: Long, val config: ModelConfig, val tapUv: Uv? = null)
 
 internal class PendingRecommendationFrame {
     private val waiting = AtomicReference<RequestToken?>()
@@ -28,7 +29,7 @@ internal class RecommendationRequests(initialConfig: ModelConfig = ModelConfig()
     var active: RequestToken? = null
         private set
 
-    fun begin(nowNs: Long) = RequestToken(++serial, nowNs, nowNs + 20_000_000_000L, config).also { active = it }
+    fun begin(nowNs: Long, tapUv: Uv? = null) = RequestToken(++serial, nowNs, nowNs + 20_000_000_000L, config, tapUv).also { active = it }
     fun cancel() { active = null }
 
     enum class Completion { ACCEPT, EXPIRED, OBSOLETE }

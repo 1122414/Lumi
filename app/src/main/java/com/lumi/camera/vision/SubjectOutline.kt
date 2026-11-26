@@ -14,12 +14,16 @@ internal data class SeenOutline(val mask: ForegroundMask, val position: SubjectP
 }
 internal typealias SegmentAt = (SubjectPixels, Uv) -> ForegroundMask?
 
+internal data class OutlineAttempt(val outline: SubjectOutline?, val status: String, val usedSeed: Uv? = null)
+
 // The source appearance is immutable. Matching locates a prompt inside the same instance;
 // it never supplies vertices for drawing. All blue pixels come from the current mask.
 internal class SubjectOutline private constructor(private val source: Observation, private val seed: Uv,
     private val original: ForegroundMask, private val sourceRegion: FaceBox, private val selection: List<Uv>, private val referenceComplete: Boolean, private val samples: List<Sample>, private val segment: SegmentAt, val person: Boolean) {
     private data class Sample(val p: Uv, val color: Int)
     val bounds get() = original.bounds
+    val capturePoints: List<Uv?> get() = original.points
+    val sourceObservation: Observation get() = source
     val hasFullCaptureContour = referenceComplete && original.points.none { it == null }
     fun containsAtCapture(p: Uv) = original.contains(p)
     private var lastSeed = seed
@@ -176,7 +180,16 @@ internal class SubjectOutline private constructor(private val source: Observatio
             return local.inImage(image.width,image.height,left,top,seed)
         }
 
-        fun from(source: Observation, selected: SelectedSubject, image: SubjectPixels, segment: SegmentAt): SubjectOutline? {
+        fun from(source: Observation, selected: SelectedSubject, image: SubjectPixels, segment: SegmentAt): SubjectOutline? =
+            diagnose(source, selected, image, segment).outline
+
+        fun diagnose(
+            source: Observation,
+            selected: SelectedSubject,
+            image: SubjectPixels,
+            segment: SegmentAt,
+            allowBoxFallback: Boolean = false,
+        ): OutlineAttempt {
             val box = selected.bounds
             val center = Uv((box.left+box.right)/2, (box.top+box.bottom)/2)
             val candidates = mutableListOf<Uv>()
@@ -184,26 +197,106 @@ internal class SubjectOutline private constructor(private val source: Observatio
                 val p = Uv(box.left+(col+0.5)*(box.right-box.left)/7, box.top+(row+0.5)*(box.bottom-box.top)/9)
                 if (selected.contains(p)) candidates.add(p)
             }
-            val seed = selected.seed ?: candidates.minByOrNull { it.distance(center) } ?: return null
-            val region = within(image, seed, box, segment) ?: return null
-            val mask = region.constrained(selected.outline,seed) ?: return null
-            // A partially occluded instance may still have a traceable visible component.
-            // Full-subject eligibility is checked separately against the extent of the selection.
-            if (candidates.count(mask::contains) < candidates.size*0.30) return null
-            val b = mask.bounds
-            val overlap = (minOf(b.right,box.right)-maxOf(b.left,box.left)).coerceAtLeast(0.0) *
-                (minOf(b.bottom,box.bottom)-maxOf(b.top,box.top)).coerceAtLeast(0.0)
-            if (overlap < (b.right-b.left)*(b.bottom-b.top)*0.50) return null
+            if (candidates.isEmpty()) return OutlineAttempt(null, "NO_INTERIOR_CANDIDATES")
+            val primary = selected.seed ?: candidates.minByOrNull { it.distance(center) }
+                ?: return OutlineAttempt(null, "NO_SEED")
+            val bw = box.right - box.left
+            val bh = box.bottom - box.top
+            val fallbackPool = listOf(
+                candidates.minByOrNull { it.distance(center) },
+                Uv(primary.x - 0.14 * bw, primary.y),
+                Uv(primary.x + 0.14 * bw, primary.y),
+                Uv(primary.x, primary.y - 0.14 * bh),
+                Uv(primary.x, primary.y + 0.14 * bh),
+            ).filterNotNull().filter { selected.contains(it) }
+            val seeds = buildList {
+                add(primary)
+                for (p in fallbackPool) {
+                    if (none { it.distance(p) < 0.025 }) add(p)
+                    if (size >= 4) break
+                }
+            }
+            var lastReason = "SEGMENT_EMPTY"
+            for ((index, seed) in seeds.withIndex()) {
+                val region = within(image, seed, box, segment)
+                if (region == null) { lastReason = "SEGMENT_EMPTY"; continue }
+                val baseMask = region.constrained(selected.outline, seed, minRetention = 0.35)
+                if (baseMask == null) { lastReason = "CONSTRAINED_TOO_SMALL"; continue }
+                // Multi-colored objects (e.g. hat+head vs overalls) can split across a collar;
+                // if the first click misses a large vertical/horizontal portion of the box, probe once more and merge.
+                var mask = baseMask
+                val mb = mask.bounds
+                if (bh > 0.12 && (mb.bottom - mb.top) < bh * 0.68) {
+                    val probeY = if ((mb.top - box.top) > (box.bottom - mb.bottom)) {
+                        (box.top + mb.top) / 2.0
+                    } else {
+                        (mb.bottom + box.bottom) / 2.0
+                    }
+                    val probe = Uv((box.left + box.right) / 2.0, probeY)
+                    if (selected.contains(probe) && !mask.contains(probe)) {
+                        val extraRaw = within(image, probe, box, segment)
+                        val extra = extraRaw?.constrained(selected.outline, probe, minRetention = 0.35)
+                        if (extra != null) {
+                            mask = mask.mergeWith(extra, seed) ?: mask
+                        }
+                    }
+                }
+                // A partially occluded instance may still have a traceable visible component.
+                // Full-subject eligibility is checked separately against the extent of the selection.
+                if (candidates.count(mask::contains) < candidates.size*0.20) { lastReason = "LOW_COVERAGE"; continue }
+                val b = mask.bounds
+                val overlap = (minOf(b.right,box.right)-maxOf(b.left,box.left)).coerceAtLeast(0.0) *
+                    (minOf(b.bottom,box.bottom)-maxOf(b.top,box.top)).coerceAtLeast(0.0)
+                if (overlap < (b.right-b.left)*(b.bottom-b.top)*0.35) { lastReason = "LOW_OVERLAP"; continue }
+                val samples = mutableListOf<Sample>()
+                for (row in 0 until 9) for (col in 0 until 7) {
+                    val x = ((b.left+(col+0.5)*(b.right-b.left)/7)*image.width).toInt()
+                    val y = ((b.top+(row+0.5)*(b.bottom-b.top)/9)*image.height).toInt()
+                    val p = Uv((x+0.5)/image.width, (y+0.5)/image.height)
+                    if (mask.contains(p)) image.at(p.x,p.y)?.let { samples.add(Sample(p,it)) }
+                }
+                if (samples.size < 6) { lastReason = "TOO_FEW_SAMPLES"; continue }
+                val complete = b.right-b.left >= 0.78*(box.right-box.left) && b.bottom-b.top >= 0.78*(box.bottom-box.top) &&
+                    b.left > 0 && b.top > 0 && b.right < 1 && b.bottom < 1
+                val outline = SubjectOutline(source, seed, mask, region.bounds, selected.outline, complete, samples, segment, selected.person)
+                return OutlineAttempt(outline, if (index == 0) "OK" else "OK_FALLBACK_SEED_$index", seed)
+            }
+            if (allowBoxFallback) {
+                boxFallback(source, selected, image, segment)?.let { return it }
+            }
+            return OutlineAttempt(null, lastReason)
+        }
+
+        private fun boxFallback(
+            source: Observation,
+            selected: SelectedSubject,
+            image: SubjectPixels,
+            segment: SegmentAt,
+        ): OutlineAttempt? {
+            val b = selected.bounds
+            val left = (b.left * image.width).toInt().coerceIn(0, image.width - 1)
+            val top = (b.top * image.height).toInt().coerceIn(0, image.height - 1)
+            val right = kotlin.math.ceil(b.right * image.width).toInt().coerceIn(left + 1, image.width)
+            val bottom = kotlin.math.ceil(b.bottom * image.height).toInt().coerceIn(top + 1, image.height)
+            if (right - left < 4 || bottom - top < 4) return null
+            val bytes = ByteArray(image.width * image.height) { -1 }
+            for (y in top until bottom) {
+                bytes.fill(0, y * image.width + left, y * image.width + right)
+            }
+            val seed = selected.seed?.takeIf {
+                it.x in b.left..<b.right && it.y in b.top..<b.bottom
+            } ?: Uv((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0)
+            val mask = ForegroundMask.at(image.width, image.height, bytes, seed) ?: return null
             val samples = mutableListOf<Sample>()
             for (row in 0 until 9) for (col in 0 until 7) {
-                val x = ((b.left+(col+0.5)*(b.right-b.left)/7)*image.width).toInt()
-                val y = ((b.top+(row+0.5)*(b.bottom-b.top)/9)*image.height).toInt()
-                val p = Uv((x+0.5)/image.width, (y+0.5)/image.height)
-                if (mask.contains(p)) image.at(p.x,p.y)?.let { samples.add(Sample(p,it)) }
+                val x = ((b.left + (col + 0.5) * (b.right - b.left) / 7) * image.width).toInt()
+                val y = ((b.top + (row + 0.5) * (b.bottom - b.top) / 9) * image.height).toInt()
+                val p = Uv((x + 0.5) / image.width, (y + 0.5) / image.height)
+                if (mask.contains(p)) image.at(p.x, p.y)?.let { samples.add(Sample(p, it)) }
             }
-            val complete = b.right-b.left >= 0.78*(box.right-box.left) && b.bottom-b.top >= 0.78*(box.bottom-box.top) &&
-                b.left > 0 && b.top > 0 && b.right < 1 && b.bottom < 1
-            return if (samples.size >= 6) SubjectOutline(source, seed, mask, region.bounds, selected.outline, complete, samples, segment, selected.person) else null
+            if (samples.size < 6) return null
+            val outline = SubjectOutline(source, seed, mask, b, selected.outline, referenceComplete = false, samples, segment, selected.person)
+            return OutlineAttempt(outline, "OK_BOX_FALLBACK", seed)
         }
     }
 }

@@ -73,4 +73,25 @@ class FrameMappingTest {
             }
         }
     }
+
+    @Test fun mirroredFrontCameraFlipsHorizontalCoordinatesAcrossAllRotations() {
+        val raw = Point(200f, 130f)
+        val fullImagePoints = listOf(Point(200f, 130f), Point(350f, 200f),
+            Point(440f, 350f), Point(130f, 440f))
+        for ((quarterTurns, full) in fullImagePoints.withIndex()) {
+            val degrees = quarterTurns * 90
+            val view = if (degrees % 180 == 0) Extent(960, 720) else Extent(720, 960)
+            val normal = FrameMapping(FrameGeometry(Extent(640, 480), crop, degrees, mirrored = false), view)
+            val mirrored = FrameMapping(FrameGeometry(Extent(640, 480), crop, degrees, mirrored = true), view)
+            val ref = mirrored.frame.uprightToReference(full)
+            val unmirroredRef = normal.frame.uprightToReference(full)
+            assertEquals(mirrored.frame.referenceSize.width - unmirroredRef.x.toDouble(), ref.x.toDouble(), 0.001)
+            assertEquals(unmirroredRef.y.toDouble(), ref.y.toDouble(), 0.001)
+            check(ref, mirrored.toReference(raw))
+            check(raw, mirrored.frame.referenceToAnalysis(ref.x, ref.y))
+            check(mirrored.toPreview(raw), mirrored.referenceToPreview(ref))
+            check(ref, mirrored.previewToReference(mirrored.referenceToPreview(ref)))
+            check(raw, mirrored.previewToAnalysis(mirrored.toPreview(raw)))
+        }
+    }
 }
