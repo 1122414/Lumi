@@ -18,6 +18,7 @@ import com.lumi.camera.camera.CameraPose
 import com.lumi.camera.camera.Crop
 import com.lumi.camera.camera.Extent
 import com.lumi.camera.camera.FrameGeometry
+import com.lumi.camera.camera.LumaStats
 import com.lumi.camera.camera.Point
 import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.ParallaxStepTracker
@@ -50,6 +51,7 @@ internal data class SceneFrame(
     val trackedFaces: List<TrackedFace> = emptyList(),
     val stepProgress: StepProgress? = null,
     val backgroundClutter: Double? = null,
+    val lumaStats: LumaStats? = null,
 )
 
 internal class CompositionAnalyzer(
@@ -132,7 +134,6 @@ internal class CompositionAnalyzer(
                     val input = if (request != null || watchPerson || runProactiveFace) InputImage.fromMediaImage(media, frame.rotation) else null
                     val detection = input?.let { detector.process(it) }
                     val objectDetection = if (request != null && input != null) objectDetector.process(input) else null
-                    val meanLuma = if (proactiveMonitor) sampleMeanLuma(image, frame) else null
                     val pixels = try {
                         when {
                             request != null -> SubjectPixels.read(image, frame, targetHeight = 256)
@@ -154,6 +155,8 @@ internal class CompositionAnalyzer(
                         faceBoxes.size >= 2 -> SubjectCandidates.unionOf(faceBoxes)
                         else -> null
                     }
+                    val lumaStats = sampleLumaStats(image, frame, primaryBox)
+                    val meanLuma = lumaStats?.meanLuma
                     val detected = when {
                         faceEntries.size == 1 -> {
                             val (id, b) = faceEntries.first()
@@ -194,6 +197,7 @@ internal class CompositionAnalyzer(
                         trackedFaces = faceEntries.map { (id, b) -> TrackedFace(id, b) },
                         stepProgress = stepProgress,
                         backgroundClutter = clutter,
+                        lumaStats = lumaStats,
                     )
                 }
             } catch (e: Exception) {
@@ -213,28 +217,54 @@ internal class CompositionAnalyzer(
         }
     }
 
-    private fun sampleMeanLuma(image: ImageProxy, frame: FrameGeometry): Int? {
+    private fun sampleLumaStats(image: ImageProxy, frame: FrameGeometry, subjectBox: FaceBox?): LumaStats? {
         val yPlane = image.planes.firstOrNull() ?: return null
         val buf = yPlane.buffer
         val start = buf.position()
         val ref = frame.referenceSize
+        val centerBox = subjectBox ?: FaceBox(0.32, 0.28, 0.68, 0.72)
         var sum = 0
         var count = 0
+        var highlights = 0
+        var shadows = 0
+        var subjSum = 0
+        var subjCount = 0
+        var bgSum = 0
+        var bgCount = 0
         for (row in 1..6) {
-            val py = (row / 7f) * ref.height
+            val ny = row / 7.0
+            val py = (ny * ref.height).toFloat()
             for (col in 1..6) {
-                val px = (col / 7f) * ref.width
+                val nx = col / 7.0
+                val px = (nx * ref.width).toFloat()
                 val raw = frame.referenceToAnalysis(px, py)
                 val rx = raw.x.toInt().coerceIn(0, image.width - 1)
                 val ry = raw.y.toInt().coerceIn(0, image.height - 1)
                 val idx = start + ry * yPlane.rowStride + rx * yPlane.pixelStride
                 if (idx in 0 until buf.limit()) {
-                    sum += buf.get(idx).toInt() and 0xFF
+                    val y = buf.get(idx).toInt() and 0xFF
+                    sum += y
                     count++
+                    if (y >= 242) highlights++
+                    if (y <= 24) shadows++
+                    if (nx in centerBox.left..centerBox.right && ny in centerBox.top..centerBox.bottom) {
+                        subjSum += y
+                        subjCount++
+                    } else {
+                        bgSum += y
+                        bgCount++
+                    }
                 }
             }
         }
-        return if (count > 0) sum / count else null
+        if (count == 0) return null
+        val diff = if (subjCount >= 2 && bgCount >= 4) (subjSum / subjCount) - (bgSum / bgCount) else null
+        return LumaStats(
+            meanLuma = sum / count,
+            highlightClipPct = highlights * 100 / count,
+            shadowClipPct = shadows * 100 / count,
+            subjectVsBgDiff = diff,
+        )
     }
 
     override fun close() {

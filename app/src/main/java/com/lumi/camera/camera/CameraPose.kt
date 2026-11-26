@@ -57,6 +57,29 @@ internal class CameraPose(context: Context, private val displayRotation: Int) : 
         samples.lastOrNull()?.takeIf { nowNs - it.first in 0..60_000_000L }?.second
 }
 
+internal class AmbientLightSensor(context: Context) : SensorEventListener {
+    private val manager = context.getSystemService(SensorManager::class.java)
+    @Volatile var latestLux: Float? = null
+        private set
+
+    fun start(): Boolean {
+        val light = manager.getDefaultSensor(Sensor.TYPE_LIGHT) ?: return false
+        return manager.registerListener(this, light, SensorManager.SENSOR_DELAY_NORMAL)
+    }
+
+    fun close() {
+        manager.unregisterListener(this)
+        latestLux = null
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        val lux = event.values.firstOrNull() ?: return
+        if (lux.isFinite() && lux >= 0f) latestLux = lux
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+}
+
 @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
 internal class CameraOptics(info: CameraInfo, private val readings: FocalReadings) {
     private val front = info.lensFacing == CameraSelector.LENS_FACING_FRONT
@@ -68,6 +91,35 @@ internal class CameraOptics(info: CameraInfo, private val readings: FocalReading
     private val ratioControl = Build.VERSION.SDK_INT >= 30 && meta.getCameraCharacteristic(C.CONTROL_ZOOM_RATIO_RANGE) != null
     private val realtime = meta.getCameraCharacteristic(C.SENSOR_INFO_TIMESTAMP_SOURCE) ==
         C.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+
+    fun capabilities(): CameraCapabilities {
+        val isoRange = meta.getCameraCharacteristic(C.SENSOR_INFO_SENSITIVITY_RANGE)
+            ?.let { it.lower..it.upper } ?: (100..3200)
+        val shutterRange = meta.getCameraCharacteristic(C.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            ?.let { it.lower..it.upper } ?: (100_000L..1_000_000_000L)
+        val evRange = meta.getCameraCharacteristic(C.CONTROL_AE_COMPENSATION_RANGE)
+            ?.let { it.lower..it.upper } ?: (-12..12)
+        val evStep = meta.getCameraCharacteristic(C.CONTROL_AE_COMPENSATION_STEP)
+            ?.toFloat()?.takeIf { it.isFinite() && it > 0f } ?: (1f / 6f)
+        val apertures = meta.getCameraCharacteristic(C.LENS_INFO_AVAILABLE_APERTURES)
+            ?.filter { it.isFinite() && it > 0f }?.sorted() ?: emptyList()
+        val caps = meta.getCameraCharacteristic(C.REQUEST_AVAILABLE_CAPABILITIES)
+        val hwLevel = meta.getCameraCharacteristic(C.INFO_SUPPORTED_HARDWARE_LEVEL)
+        val manualSensor = caps?.contains(C.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true ||
+            hwLevel == C.INFO_SUPPORTED_HARDWARE_LEVEL_3 ||
+            hwLevel == C.INFO_SUPPORTED_HARDWARE_LEVEL_FULL
+        val awbModes = meta.getCameraCharacteristic(C.CONTROL_AWB_AVAILABLE_MODES)
+        val manualWb = awbModes?.contains(C.CONTROL_AWB_MODE_OFF) == true
+        return CameraCapabilities(
+            isoRange = isoRange,
+            shutterRangeNs = shutterRange,
+            evIndexRange = evRange,
+            evStep = evStep,
+            apertures = apertures,
+            supportsManualSensor = manualSensor,
+            supportsManualWb = manualWb,
+        )
+    }
 
     fun captureTimeNs(timestamp: Long): Long {
         // Some cameras use the uptime timebase. Never re-date a frame at detector completion.
@@ -103,11 +155,18 @@ internal class FocalReadings : CameraCaptureSession.CaptureCallback() {
     private data class Reading(val mm: Float?, val zoom: Float?, val crop: Rect?)
     private val values = LinkedHashMap<Long, Reading>()
     private var unitFocal: Float? = null
+    @Volatile private var latestExposure = ExposureBaseline()
+    @Volatile private var lastAutoExposure = ExposureBaseline()
 
     @Synchronized fun reset() {
         values.clear()
         unitFocal = null
+        latestExposure = ExposureBaseline()
+        lastAutoExposure = ExposureBaseline()
     }
+
+    fun latestExposure(): ExposureBaseline = latestExposure
+    fun lastAutoExposure(): ExposureBaseline = lastAutoExposure
 
     @Synchronized override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest,
         result: TotalCaptureResult) {
@@ -115,6 +174,16 @@ internal class FocalReadings : CameraCaptureSession.CaptureCallback() {
         val ratio = if (Build.VERSION.SDK_INT >= 30) result.get(CaptureResult.CONTROL_ZOOM_RATIO) else null
         values[time] = Reading(result.get(CaptureResult.LENS_FOCAL_LENGTH), ratio, result.get(CaptureResult.SCALER_CROP_REGION))
         if (values.size > 32) values.remove(values.keys.first())
+        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+        val shutterNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+        val aperture = result.get(CaptureResult.LENS_APERTURE)
+        val evIndex = result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION) ?: 0
+        val current = ExposureBaseline(iso, shutterNs, aperture, evIndex)
+        latestExposure = current
+        val aeMode = result.get(CaptureResult.CONTROL_AE_MODE)
+        if (aeMode != CaptureResult.CONTROL_AE_MODE_OFF && iso != null && shutterNs != null) {
+            lastAutoExposure = current
+        }
     }
 
     @Synchronized fun effectiveFocal(time: Long, requested: Float, active: Rect, ratioControl: Boolean, singleFocal: Float?): Float? {

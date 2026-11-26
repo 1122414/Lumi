@@ -60,6 +60,7 @@ import com.lumi.camera.BuildConfig
 import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.CandidateOverlay
+import com.lumi.camera.camera.ExposureControlMode
 import com.lumi.camera.camera.Viewfinder
 import com.lumi.camera.camera.ViewfinderLens
 import com.lumi.camera.camera.ViewfinderZoom
@@ -175,6 +176,10 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     var proactivityMode by remember {
         mutableStateOf(ProactivityMode.fromWire(uiPrefs.getString("proactivity_mode", null)))
     }
+    var exposureMode by remember {
+        mutableStateOf(ExposureControlMode.fromWire(uiPrefs.getString("exposure_mode", null)))
+    }
+    var exposureState by remember { mutableStateOf(ExposureUiState(mode = exposureMode)) }
     var lastReview by remember { mutableStateOf<PostShotReview?>(null) }
     var reviewBannerVisible by remember { mutableStateOf(false) }
     var reviewDialogOpen by remember { mutableStateOf(false) }
@@ -198,7 +203,12 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                 lastReview = review
                 reviewBannerVisible = true
             },
-            initialProactivity = proactivityMode)
+            onExposure = { nextExp ->
+                exposureState = nextExp
+                exposureMode = nextExp.mode
+            },
+            initialProactivity = proactivityMode,
+            initialExposureMode = exposureMode)
     }
     LaunchedEffect(lastReview?.capturedAtMs) {
         if (lastReview != null) {
@@ -346,6 +356,26 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                     frame.stepProgress?.let { step ->
                         StepProgressPill(step)
                     }
+                    AiExposureActionPill(
+                        state = exposureState,
+                        onApplyPending = session::applyPendingAiExposure,
+                        onRevertApplied = session::revertAiExposure,
+                    )
+                }
+                if (exposureState.mode == ExposureControlMode.AI_AUTO) {
+                    val hud = exposureState.telemetry.hudSummary()
+                    if (hud.isNotEmpty()) {
+                        Box(
+                            Modifier
+                                .align(Alignment.TopStart)
+                                .padding(start = 8.dp, top = 8.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0x99101513))
+                                .padding(horizontal = 7.dp, vertical = 3.dp),
+                        ) {
+                            Text(hud, color = Color(0xFFB3DBBE), fontSize = 9.sp, maxLines = 1)
+                        }
+                    }
                 }
                 val bannerReview = lastReview
                 if (reviewBannerVisible && bannerReview != null) {
@@ -359,7 +389,7 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                         border = BorderStroke(1.dp, Color(0x99B3DBBE)),
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .padding(bottom = if (bound && zoom.max > zoom.min) 52.dp else 12.dp, start = 14.dp, end = 14.dp),
+                            .padding(bottom = if (exposureState.mode == ExposureControlMode.MANUAL) 142.dp else if (bound && zoom.max > zoom.min) 52.dp else 12.dp, start = 14.dp, end = 14.dp),
                     ) {
                         Row(
                             Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
@@ -383,25 +413,69 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                         }
                     }
                 }
-                if (bound && zoom.max > zoom.min) {
+                if (exposureState.mode == ExposureControlMode.MANUAL) {
+                    ManualExposurePanel(
+                        state = exposureState,
+                        onUpdateManual = session::updateManualExposure,
+                        onApplyAiToManual = session::applyLatestAiToManual,
+                        onResetManual = session::resetManualExposure,
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                } else if (bound && zoom.max > zoom.min) {
                     ZoomWheel(zoom, session::setZoom, Modifier.align(Alignment.BottomCenter))
                 }
             }
         }
-        Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal = 16.dp),
+        Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Lumi", color = Color.White)
-            TextButton(onClick = { settingsOpen = true }, modifier = Modifier.weight(1f)) {
-                Text("模型", fontSize = 13.sp)
-                Spacer(Modifier.width(8.dp))
+            Text("Lumi", color = Color.White, fontSize = 14.sp)
+            TextButton(
+                onClick = { settingsOpen = true },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+            ) {
+                Text("模型", fontSize = 12.sp)
+                Spacer(Modifier.width(4.dp))
                 Text(config.safeText(config.model), Modifier.weight(1f), color = Color.White, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, fontSize = 13.sp)
+                    overflow = TextOverflow.Ellipsis, fontSize = 11.sp)
                 Text(when {
                     !configured -> "未配置"
-                    lastFailed -> "上次失败"
+                    lastFailed -> "失败"
                     else -> "可用"
-                }, fontSize = 12.sp)
+                }, fontSize = 11.sp)
             }
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        when (exposureMode) {
+                            ExposureControlMode.AI_AUTO -> Color(0xFFFFD54F)
+                            ExposureControlMode.MANUAL -> Color(0xFF38DF85)
+                            ExposureControlMode.AUTO -> Color(0x2EFFFFFF)
+                        }
+                    )
+                    .clickable(role = Role.Button) {
+                        val next = exposureMode.next()
+                        exposureMode = next
+                        uiPrefs.edit().putString("exposure_mode", next.wire).apply()
+                        session.setExposureMode(next)
+                        onMessage(when (next) {
+                            ExposureControlMode.AUTO -> "曝光自动：系统默认测光"
+                            ExposureControlMode.AI_AUTO -> "AI自动挡：结合实时光影测光给出参数"
+                            ExposureControlMode.MANUAL -> "M手动挡：EV / ISO / 快门 / 色温（单项支持 AUTO）"
+                        })
+                    }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = exposureMode.label,
+                    color = if (exposureMode == ExposureControlMode.AUTO) Color(0xFFE0E5E2) else Color(0xFF102016),
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                )
+            }
+            Spacer(Modifier.width(5.dp))
             Box(
                 Modifier
                     .clip(RoundedCornerShape(12.dp))

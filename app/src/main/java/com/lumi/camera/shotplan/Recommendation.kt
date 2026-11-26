@@ -35,11 +35,12 @@ internal class Recommendation private constructor(
     val candidateId: Int? = null,
     val directorCue: DirectorCue? = null,
     val stepDirection: StepDirection? = null,
+    val exposureSuggestion: AiExposureSuggestion? = null,
 ) {
     fun withMeasuredBounds(bounds: FaceBox): Recommendation {
         val selectedChoice = choice ?: return this
         val computed = CompositionChoice.aimPointFor(bounds, selectedChoice)
-        return Recommendation(computed, confidence, computed == Uv.CENTER, reason, subject, selectedChoice, suggestedZoom, candidateId, directorCue, stepDirection)
+        return Recommendation(computed, confidence, computed == Uv.CENTER, reason, subject, selectedChoice, suggestedZoom, candidateId, directorCue, stepDirection, exposureSuggestion)
     }
 
     val caption: String = run {
@@ -66,8 +67,8 @@ internal class Recommendation private constructor(
         private val jsonToken = java.util.regex.Pattern.compile(
             """[ \t\r\n]+|[{}\[\],:]|true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|(?:"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")""")
 
-        private val candidateAllowedKeys = setOf("candidate", "choice", "reason", "name", "zoom", "confidence", "focus", "tip", "step")
-        private val choiceAllowedKeys = setOf("subject", "choice", "confidence", "reason", "zoom", "focus", "tip", "step")
+        private val candidateAllowedKeys = setOf("candidate", "choice", "reason", "name", "zoom", "confidence", "focus", "tip", "step", "exposure")
+        private val choiceAllowedKeys = setOf("subject", "choice", "confidence", "reason", "zoom", "focus", "tip", "step", "exposure")
 
         fun hasJsonTokens(text: String): Boolean {
             if (text.length > 8192 || !text.trimStart().startsWith('{')) return false
@@ -113,10 +114,11 @@ internal class Recommendation private constructor(
             val suggestedZoom = SubjectCandidates.resolveSuggestedZoom(fields["zoom"], zoomStops, currentZoom)
             val directorCue = DirectorCue.parse(fields["focus"], fields["tip"])
             val stepDirection = StepDirection.parse(fields["step"])
+            val exposureSuggestion = AiExposureSuggestion.parse(fields["exposure"])
             val subject = picked.toSelectedSubject(nameOverride)
             val aim = CompositionChoice.aimPointFor(subject.bounds, choice)
             return PlanResult.Accepted(
-                Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, candidateId = id, directorCue = directorCue, stepDirection = stepDirection)
+                Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, candidateId = id, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion)
             )
         }
 
@@ -138,9 +140,10 @@ internal class Recommendation private constructor(
                 val suggestedZoom = SubjectCandidates.resolveSuggestedZoom(fields["zoom"], zoomStops, currentZoom)
                 val directorCue = DirectorCue.parse(fields["focus"], fields["tip"])
                 val stepDirection = StepDirection.parse(fields["step"])
+                val exposureSuggestion = AiExposureSuggestion.parse(fields["exposure"])
                 val aim = CompositionChoice.aimPointFor(subject.bounds, choice)
                 return PlanResult.Accepted(
-                    Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, directorCue = directorCue, stepDirection = stepDirection)
+                    Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion)
                 )
             }
             if (fields.keys != setOf("aimPoint", "confidence", "alreadyGood", "reason", "subject")) return malformed

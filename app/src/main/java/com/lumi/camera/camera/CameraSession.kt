@@ -2,6 +2,7 @@ package com.lumi.camera.camera
 
 import android.content.ContentValues
 import android.content.Context
+import android.hardware.camera2.CaptureRequest
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Environment
@@ -11,7 +12,9 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.view.View
+import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Camera
@@ -43,6 +46,7 @@ import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.guidance.StepProgress
 import com.lumi.camera.guidance.Uv
 import com.lumi.camera.shotplan.AestheticPreferenceStore
+import com.lumi.camera.shotplan.AiExposureSuggestion
 import com.lumi.camera.shotplan.CompositionChoice
 import com.lumi.camera.shotplan.CompositionDiagnostic
 import com.lumi.camera.shotplan.CompositionPreset
@@ -62,6 +66,7 @@ import com.lumi.camera.shotplan.RememberedComposition
 import com.lumi.camera.shotplan.RequestToken
 import com.lumi.camera.shotplan.SubjectCandidate
 import com.lumi.camera.shotplan.VisionChat
+import com.lumi.camera.ui.ExposureUiState
 import com.lumi.camera.vision.CompositionAnalyzer
 import com.lumi.camera.vision.OutlineAttempt
 import com.lumi.camera.vision.PostShotRecrop
@@ -121,7 +126,9 @@ internal class CameraSession(
     private val onLens: (ViewfinderLens) -> Unit = {},
     private val onPreset: (PresetSelection) -> Unit = {},
     private val onCaptured: (PostShotReview) -> Unit = {},
+    private val onExposure: (ExposureUiState) -> Unit = {},
     initialProactivity: ProactivityMode = ProactivityMode.MANUAL,
+    initialExposureMode: ExposureControlMode = ExposureControlMode.AUTO,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
     private data class Binding(val size: Extent, val rotation: Int, val lensFacing: Int)
     private val context = view.context
@@ -180,6 +187,14 @@ internal class CameraSession(
     private var trackerLostSinceNs: Long? = null
     private var subjectLostNotified = false
     private var poses: CameraPose? = null
+    private var lightSensor: AmbientLightSensor? = null
+    private var capabilities = CameraCapabilities()
+    private var exposureMode = initialExposureMode
+    private var manualExposure = ManualExposureSettings()
+    private var pendingAiExposure: AiExposureSuggestion? = null
+    private var appliedAiExposure: AiExposureSuggestion? = null
+    private var latestAiExposure: AiExposureSuggestion? = null
+    private var lastTelemetryPushNs = 0L
     private var observer: CompositionAnalyzer? = null
     private var provider: ProcessCameraProvider? = null
     private var binding: Binding? = null
@@ -270,7 +285,12 @@ internal class CameraSession(
             val sensors = CameraPose(context, rotation)
             poses = sensors
             if (!sensors.start()) onMessage("此设备的旋转矢量传感器不可用。")
-            val analyzer = CompositionAnalyzer(context, CameraOptics(camera.cameraInfo, readings), sensors,
+            val luxSensor = AmbientLightSensor(context)
+            lightSensor = luxSensor
+            luxSensor.start()
+            val optics = CameraOptics(camera.cameraInfo, readings)
+            capabilities = optics.capabilities()
+            val analyzer = CompositionAnalyzer(context, optics, sensors,
                 mirrored = front,
                 modelFrameReady = { token, sample -> main.execute { sendRecommendation(token, sample) } }) { result ->
                 main.execute {
@@ -282,6 +302,8 @@ internal class CameraSession(
             analysis.setAnalyzer(worker, analyzer)
             binding = next
             capture = photo
+            applyExposureToHardware()
+            publishExposureState()
             val lensStops = rearZoomStops(context, camera.cameraInfo)
             val ranges = Observer<ZoomState> { range ->
                 if (this.camera === camera && (zoom.min != range.minZoomRatio || zoom.max != range.maxZoomRatio)) {
@@ -403,6 +425,10 @@ internal class CameraSession(
         }
         if (active?.target?.stepDirection != null && frame.stepProgress != null) {
             latestStepProgress = frame.stepProgress
+        }
+        if (now - lastTelemetryPushNs >= 250_000_000L) {
+            lastTelemetryPushNs = now
+            publishExposureState()
         }
         render()
         if (proactivityMode == ProactivityMode.PROACTIVE &&
@@ -653,9 +679,163 @@ internal class CameraSession(
             trackerLostSinceNs = null
             subjectLostNotified = false
             lastReadyState = false
+            pendingAiExposure = null
             observer?.apply { watchPerson = false; tracker = null; stepTracker = null }
             onRecommendationStatus(null)
+            publishExposureState()
             render()
+        }
+    }
+
+    private fun currentTelemetry(frame: SceneFrame? = latest): LiveTelemetry {
+        val base = readings.latestExposure()
+        val evStep = capabilities.evStep.takeIf { it > 0f } ?: (1f / 6f)
+        val stats = frame?.lumaStats
+        return LiveTelemetry(
+            iso = base.iso,
+            shutterNs = base.shutterNs,
+            aperture = base.aperture ?: capabilities.primaryAperture,
+            evSteps = base.evIndex * evStep,
+            ambientLux = lightSensor?.latestLux,
+            meanLuma = stats?.meanLuma ?: frame?.meanLuma,
+            highlightClipPct = stats?.highlightClipPct,
+            shadowClipPct = stats?.shadowClipPct,
+            subjectVsBgDiff = stats?.subjectVsBgDiff,
+        )
+    }
+
+    private fun publishExposureState() {
+        onExposure(
+            ExposureUiState(
+                mode = exposureMode,
+                capabilities = capabilities,
+                telemetry = currentTelemetry(),
+                manual = manualExposure,
+                pendingAiSuggestion = pendingAiExposure,
+                appliedAiSuggestion = appliedAiExposure,
+                latestAiSuggestion = latestAiExposure,
+            )
+        )
+    }
+
+    fun setExposureMode(mode: ExposureControlMode) {
+        if (exposureMode == mode) return
+        exposureMode = mode
+        when (mode) {
+            ExposureControlMode.AUTO -> {
+                pendingAiExposure = null
+                appliedAiExposure = null
+            }
+            ExposureControlMode.AI_AUTO -> {
+                // Keep any latest AI suggestion ready if user wants to apply it.
+            }
+            ExposureControlMode.MANUAL -> {
+                pendingAiExposure = null
+                appliedAiExposure = null
+            }
+        }
+        applyExposureToHardware()
+        publishExposureState()
+    }
+
+    fun updateManualExposure(settings: ManualExposureSettings) {
+        manualExposure = settings
+        if (exposureMode != ExposureControlMode.MANUAL) {
+            exposureMode = ExposureControlMode.MANUAL
+        }
+        appliedAiExposure = null
+        pendingAiExposure = null
+        applyExposureToHardware()
+        publishExposureState()
+    }
+
+    fun resetManualExposure() {
+        manualExposure = ManualExposureSettings()
+        appliedAiExposure = null
+        pendingAiExposure = null
+        applyExposureToHardware()
+        publishExposureState()
+    }
+
+    fun applyPendingAiExposure() {
+        val suggestion = pendingAiExposure ?: return
+        pendingAiExposure = null
+        appliedAiExposure = suggestion
+        applyExposureToHardware()
+        publishExposureState()
+        onMessage("已应用 AI 光影参数：${suggestion.summaryLabel()}")
+    }
+
+    fun revertAiExposure() {
+        appliedAiExposure = null
+        pendingAiExposure = null
+        applyExposureToHardware()
+        publishExposureState()
+        onMessage("已还原为自动测光")
+    }
+
+    fun applyLatestAiToManual() {
+        val suggestion = latestAiExposure ?: return
+        manualExposure = ExposureSolver.fromAiSuggestion(suggestion, capabilities)
+        exposureMode = ExposureControlMode.MANUAL
+        pendingAiExposure = null
+        appliedAiExposure = null
+        applyExposureToHardware()
+        publishExposureState()
+        onMessage("已将 AI 建议填入 M 手动挡，可继续微调")
+    }
+
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+    private fun applyExposureToHardware() {
+        val cam = camera ?: return
+        val effectiveSettings = when (exposureMode) {
+            ExposureControlMode.AUTO -> ManualExposureSettings()
+            ExposureControlMode.MANUAL -> manualExposure
+            ExposureControlMode.AI_AUTO -> appliedAiExposure?.let { ExposureSolver.fromAiSuggestion(it, capabilities) }
+                ?: ManualExposureSettings()
+        }
+        val baseline = readings.lastAutoExposure().takeIf { it.iso != null && it.shutterNs != null }
+            ?: readings.latestExposure()
+        val resolved = ExposureSolver.resolve(effectiveSettings, capabilities, baseline)
+
+        val options = CaptureRequestOptions.Builder()
+        if (resolved.aeAuto) {
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            options.clearCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY)
+            options.clearCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME)
+            runCatching { cam.cameraControl.setExposureCompensationIndex(resolved.evIndex) }
+        } else {
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            resolved.manualIso?.let { options.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, it) }
+            resolved.manualShutterNs?.let { options.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
+        }
+
+        if (resolved.wbKelvin != null) {
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+            options.setCaptureRequestOption(
+                CaptureRequest.COLOR_CORRECTION_MODE,
+                CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX,
+            )
+            options.setCaptureRequestOption(
+                CaptureRequest.COLOR_CORRECTION_GAINS,
+                ExposureSolver.kelvinToRggbVector(resolved.wbKelvin),
+            )
+        } else {
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            options.clearCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_MODE)
+            options.clearCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_GAINS)
+        }
+
+        if (resolved.aperture != null) {
+            options.setCaptureRequestOption(CaptureRequest.LENS_APERTURE, resolved.aperture)
+        } else {
+            options.clearCaptureRequestOption(CaptureRequest.LENS_APERTURE)
+        }
+
+        runCatching {
+            Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(options.build())
+        }.onFailure { e ->
+            Log.w("LumiCamera", "Unable to apply Camera2 exposure options", e)
         }
     }
 
@@ -741,6 +921,8 @@ internal class CameraSession(
         val candidates = sample.candidates
         val userTapped = sample.tapUv != null
         val preferencePrior = aestheticPrefs.read().promptPrior()
+        val telemetrySummary = currentTelemetry(source).promptSummary(capabilities)
+        val requestExposureAdvice = exposureMode != ExposureControlMode.AUTO
         onRecommendationStatus(
             when {
                 userTapped -> "正在围绕所选主体构图…"
@@ -760,7 +942,7 @@ internal class CameraSession(
                 val jpeg = sample.use { task.remainingMs(); it.jpeg() }
                 if (BuildConfig.DEBUG) sentJpeg = jpeg
                 sentNs = SystemClock.elapsedRealtimeNanos()
-                Result.success(task.send(jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom, preferencePrior))
+                Result.success(task.send(jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom, preferencePrior, telemetrySummary, requestExposureAdvice))
             } catch (e: Exception) { Result.failure(e) }
             val times = RequestTimes(token.config, token.startedNs, sentNs ?: now, SystemClock.elapsedRealtimeNanos())
             main.execute select@{
@@ -849,6 +1031,23 @@ internal class CameraSession(
         } else {
             observer?.stepTracker = null
             latestStepProgress = null
+        }
+        val aiExp = plan.exposureSuggestion
+        if (aiExp != null) {
+            latestAiExposure = aiExp
+            if (exposureMode == ExposureControlMode.AI_AUTO) {
+                if (proactivityMode == ProactivityMode.PROACTIVE) {
+                    appliedAiExposure = aiExp
+                    pendingAiExposure = null
+                    applyExposureToHardware()
+                } else if (proactivityMode == ProactivityMode.MANUAL) {
+                    pendingAiExposure = aiExp
+                }
+            }
+            publishExposureState()
+        } else if (pendingAiExposure != null) {
+            pendingAiExposure = null
+            publishExposureState()
         }
         // Automatically lock AF/AE focus and metering onto the chosen subject.
         val size = binding?.size
@@ -1076,6 +1275,10 @@ internal class CameraSession(
         selection = null
         poses?.close()
         poses = null
+        lightSensor?.close()
+        lightSensor = null
+        pendingAiExposure = null
+        appliedAiExposure = null
         handler.removeCallbacks(expire)
         uses.filterIsInstance<ImageAnalysis>().forEach { it.clearAnalyzer() }
         if (uses.isNotEmpty()) provider?.unbind(*uses)

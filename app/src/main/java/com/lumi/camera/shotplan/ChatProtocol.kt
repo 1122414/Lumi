@@ -30,11 +30,18 @@ internal object ChatProtocol {
         zoomStops: List<Float> = emptyList(),
         currentZoom: Float = 1f,
         preferencePrior: String? = null,
+        telemetrySummary: String? = null,
+        requestExposureAdvice: Boolean = false,
     ): String {
         val zoomHint = if (zoomStops.size >= 2) {
             val stopsText = zoomStops.joinToString("/") { String.format(Locale.ROOT, "%.1f", it).removeSuffix(".0") }
             val curText = String.format(Locale.ROOT, "%.1f", currentZoom).removeSuffix(".0")
             "当前倍率 ${curText}x，可选焦段[$stopsText]：若背景杂乱或主体过小/过大需要换景别，可在 zoom 填一个可选焦段数字，否则省略或填 null。"
+        } else {
+            ""
+        }
+        val exposureHint = if (requestExposureAdvice) {
+            "请结合现场实时测光与画面天气/顺逆光/光比，给出可选 \"exposure\":{\"ev\":-0.7,\"wb\":5600,\"reason\":\"逆光压高光\"}（ev 为 -2.5~2.5 曝光补偿；如需防手抖或特定暗光控制可填 shutter_ms 或 iso；wb 为 2800~7500 色温K；当前曝光已很准时可省略 exposure）。"
         } else {
             ""
         }
@@ -59,12 +66,18 @@ internal object ChatProtocol {
                 append("再按问题严重度选最值钱的 1 个执导维度 focus(framing/background/lighting/pose)，用 12 字以内零术语口语写一条 tip（如避开背景杂物、借侧光、微调姿势）；若仅需转动构图可省略 focus 和 tip。")
                 append("仅当原地转动无法避开背后柱子/路人/遮挡物或需改变拍摄距离时，可加 \"step\":\"left\"|\"right\"|\"closer\"|\"back\"，否则省略。")
                 if (zoomHint.isNotEmpty()) append(zoomHint)
+                if (!telemetrySummary.isNullOrBlank()) append(telemetrySummary)
+                if (exposureHint.isNotEmpty()) append(exposureHint)
                 if (!preferencePrior.isNullOrBlank()) append(preferencePrior)
                 append("reason 十字以内写画面效果，不写左右上下移动指令。")
             }
         } else {
-            val withZoom = if (zoomHint.isEmpty()) prompt else "$prompt\n$zoomHint"
-            if (preferencePrior.isNullOrBlank()) withZoom else "$withZoom\n$preferencePrior"
+            val parts = mutableListOf(prompt)
+            if (zoomHint.isNotEmpty()) parts += zoomHint
+            if (!telemetrySummary.isNullOrBlank()) parts += telemetrySummary
+            if (exposureHint.isNotEmpty()) parts += exposureHint
+            if (!preferencePrior.isNullOrBlank()) parts += preferencePrior
+            parts.joinToString("\n")
         }
         val hint = preset.promptHint ?: return base
         return "$base\n$hint"
@@ -78,10 +91,12 @@ internal object ChatProtocol {
         zoomStops: List<Float> = emptyList(),
         currentZoom: Float = 1f,
         preferencePrior: String? = null,
+        telemetrySummary: String? = null,
+        requestExposureAdvice: Boolean = false,
     ): ByteArray {
         val url = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
         val content = JSONArray()
-            .put(JSONObject().put("type", "text").put("text", promptFor(preset, candidates, zoomStops, currentZoom, preferencePrior)))
+            .put(JSONObject().put("type", "text").put("text", promptFor(preset, candidates, zoomStops, currentZoom, preferencePrior, telemetrySummary, requestExposureAdvice)))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", url)))
         val messages = JSONArray().put(JSONObject().put("role", "user").put("content", content))
         val body = JSONObject().put("model", model).put("messages", messages).put("stream", false)
