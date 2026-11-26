@@ -1,22 +1,123 @@
-# Lumi · 安卓 M3 推荐构图
+<div align="center">
 
-后置竖屏相机默认 1×。取景器底部的变焦轮盘可左右拖动，松手保持当前倍率（例如 2.8×）。点轮盘下缘的数字可直达关键倍率，也可以在取景器里双指连续缩放。轮盘范围由 CameraX 提供，快捷倍率按后置镜头公开的焦距和传感器尺寸换算。PKX110 另保留原厂拍照界面确认的 4× 快捷档。对准想拍的人或物件后点一次「推荐构图」，相机会发送当前倍率下第一张与手机姿态同步的新画面。模型选定主体和推荐取景中心，快门上方显示十字以内的理由。引导期间改变倍率会清除旧构图，可以在新倍率下拍照或重新推荐。
+# Lumi
 
-蓝色虚线标出手机在当前画面中确认的主体外缘。认出完整主体后，绿环根据它在当前画面和推荐画面中的位置计算。跟着绿环原地转动或仰俯手机，转过头时绿环会换到白点另一侧。核对背景期间也能跟随绿环。主体本应在画面内却无法确认时，引导暂停。手机明显转开且原主体已在画面外时，边缘绿环给出返回方向。主体完整、背景相符，回到推荐构图并停稳时会提示「可以拍」，由你按快门。
+**Real-Time AI Photography Director for Android**  
+*See the scene, frame the shot, and nail the composition — before you press the shutter.*
 
-前景分割在手机上运行，使用 MediaPipe Tasks Vision 0.10.35 和随应用打包的 Google Magic Touch v1 模型。模型大小 6,227,884 字节，SHA-256 为 `e24338a717c1b7ad8d159666677ef400babb7f33b8ad60c4d96db4ecf694cd25`。[模型来源](https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite) · [Google 模型卡](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MagicTouch.pdf) · [Apache 2.0 许可](app/src/main/assets/magic_touch.LICENSE.txt)
+<p>
+  <a href="./README.md"><strong>English</strong></a> ·
+  <a href="./README.zh-CN.md">简体中文</a>
+</p>
 
-推荐图仅在内存中处理。模型可以推荐保留当前构图，此时目标就在白点处，仍需核对画面并停稳。方案被拒绝时，快门上方会显示具体原因，例如「模型对这次构图把握不足」或「推荐角度会裁掉主体」。请求期限为 20 秒，再次点推荐会替换上次请求。退到后台或相机会话重建后需重新推荐。开发者可在 debug 版右上角点「调试」，选择「记住这个构图」离线检查绿环。
+<p>
+  <img src="https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2026%2B)-3DDC84?logo=android&logoColor=white" alt="Android 8.0+" />
+  <img src="https://img.shields.io/badge/Language-Kotlin-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin" />
+  <img src="https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?logo=jetpackcompose&logoColor=white" alt="Jetpack Compose" />
+  <img src="https://img.shields.io/badge/Camera-CameraX%201.5-0F9D58" alt="CameraX" />
+  <img src="https://img.shields.io/badge/On--Device%20Vision-ML%20Kit%20%2B%20MediaPipe-FF6F00" alt="ML Kit + MediaPipe" />
+</p>
 
-## 在手机上配置模型
+</div>
 
-点取景器上方的「模型」，填写接口地址、模型名和 API key。接口需支持 Chat Completions 和内嵌 JPEG 的 `image_url`。填到 `/v1` 会自动追加 `/chat/completions`，也可填完整接口地址。点「测试连接」会发送一张内置的 96 × 96 苹果图，面板显示结果和耗时。点「保存」会清除当前推荐，下一次推荐立即使用新配置。
+---
 
-「未配置」表示缺少有效配置。「可用」表示配置可以发起请求，「上次失败」表示这组配置最近一次连接或模型回复校验失败。设置面板里的测试可以确认当前是否连通。API key 默认隐藏，临时显示 10 秒后自动隐藏，设置面板禁止系统截图。保存的密钥经 Android Keystore 的 AES-GCM 密钥加密。
+## Why Lumi?
 
-release 版使用 HTTPS。debug 版也支持 HTTP。手机和电脑在同一可信局域网时，可以填写电脑的局域网地址，例如 `http://192.168.1.20:3425/v1`，电脑服务需监听该地址并允许手机访问。使用 USB 时，执行 `adb reverse tcp:3425 tcp:3425`，手机填写 `http://127.0.0.1:3425/v1`。
+Most camera apps focus on **post-processing** — endless filter packs, heavy beauty smoothing, or cloud retouching *after* a mediocre photo has already been taken.
 
-应用内保存的配置优先。首次使用且从未保存过配置时，debug 版可从构建时的 `local.properties` 取得以下默认值。保留原有的 `sdk.dir`。这些默认值会打包进 debug APK，请勿分发含个人密钥的 APK 或提交 `local.properties`。release 版从空配置开始。
+**Lumi focuses on the moment before the shutter.**  
+Using a **Hybrid Cloud + 60fps On-Device Architecture**, Lumi pairs a cloud Vision LLM as your **photography brain** with low-latency on-device sensors, segmentation, and tracking as your **framing stabilizer**. Instead of overwhelming you with jargon or grids, Lumi gives **one clear, actionable cue at a time** — guiding your phone smoothly into a better composition.
+
+---
+
+## Key Features
+
+| Capability | What It Does |
+| :--- | :--- |
+| **Hybrid Cloud + 60fps Guidance** | On-device ML Kit detects faces, group portraits, and foreground candidates first; the cloud vision model picks the best subject, composition intent, and focal length via ultra-compact JSON (~1s response), while quaternion pose projection drives a silky 60fps green guidance ring locally. |
+| **Tap-to-Lock Subject & AF/AE** | Tap any person or object in the viewfinder to lock your intent immediately. Lumi simultaneously triggers CameraX `FocusMeteringAction` on the selected subject and passes your tap marker to the model. |
+| **Multi-Person & Object Support** | Automatically recognizes solo portraits, multi-face group shots, and everyday objects. Uses MediaPipe Magic Touch on-device segmentation with candidate-box fallback for slender or low-contrast subjects. |
+| **3D Anti-Drift & Parallax Tracking** | A ~1 ms/frame local color tracker compensates for slight subject motion and close-range parallax, while elevation anchoring (`12°` guard) prevents false ring lock if you pitch the phone sharply away. |
+| **Optical Zoom Wheel & Focal Hints** | Reads real Camera2 focal lengths and sensor dimensions to build hardware-accurate zoom stops (`0.6×`, `1×`, `2×`, `3×`, etc.). When the model recommends switching focal length, a one-tap pill jumps to that stop **without losing active composition guidance**. |
+| **Instant Local Composition Presets** | Switch between `Auto`, `Rule of Thirds (L/R)`, `Symmetry`, `Tight`, and `Headroom` right in the viewfinder with zero network latency. |
+| **Horizon Level, Haptics & Auto-Shoot** | A minimalist horizon bar flanks the center reticle and turns green within `±2.5°` (WYSIWYG with the ready gate). Enjoy subtle haptic feedback on alignment and an optional hands-free **Auto-Shoot** timer (`450 ms` steady hold). |
+| **Privacy & Credential Security** | Frames sent for recommendation are processed in memory only. API keys are encrypted with Android Keystore AES-GCM, hidden by default, and protected with screenshot blocking on the settings dialog. |
+
+---
+
+## How It Works
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         VIEWFINDER (60 fps)                             │
+│  CameraX Preview · Precision Zoom Wheel · Horizon Level · Tap Subject   │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │
+        ┌───────────────────────┴───────────────────────┐
+        ▼                                               ▼
+┌──────────────────────────────┐        ┌──────────────────────────────┐
+│   On-Device Vision & Sensors │        │   Cloud Vision Brain (VLM)   │
+│  • ML Kit Face & Object Cand.│ 512px  │  • Picks best candidate ID   │
+│  • Tap Marker + Zoom Stops   ├───────►│  • Chooses framing intent    │
+│  • MediaPipe Magic Touch     │ <───┐  │  • Suggests optical zoom     │
+│  • 1ms/frame SubjectTracker  │     │  │  • Returns ≤10-char reason   │
+│  • Quaternion PoseGuidance   │ JSON│  └──────────────────────────────┘
+└──────────────┬───────────────┘     │
+               └─────────────────────┘
+                                │
+                                ▼
+    Smooth Green Ring + Subject Outline + Haptic Cue + Optional Auto-Shoot
+```
+
+1. **Aim or Tap**: Point at your scene (or tap a specific subject) and press **Recommend**.
+2. **Instant Local Feedback**: Lumi highlights detected candidates / focus reticle within milliseconds while querying your configured vision endpoint.
+3. **Follow the Green Ring**: Rotate or tilt the phone to align the green ring with the center dot and keep the horizon bar green.
+4. **Capture**: Tap the shutter on the haptic **"Ready"** cue — or toggle **Auto-Shoot** for automatic capture once steady.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **JDK**: 17+ (JDK 21 bundled with Android Studio JBR works out of the box)
+- **Android SDK**: Platform `36`, Build Tools `36.0.0`
+- **Minimum Device**: Android 8.0 (`minSdk 26`), physical rear camera recommended
+
+### Build, Test & Install
+
+```bash
+# Optional on macOS when using Android Studio's bundled JDK
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+
+# Run unit tests, assemble debug APK, and run lint
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+
+# Install directly to a connected Android device via ADB
+./gradlew :app:installDebug
+```
+
+The debug APK is generated at `app/build/outputs/apk/debug/app-debug.apk`.
+
+---
+
+## Model Configuration
+
+Lumi works with any **OpenAI-compatible Vision Chat Completions API** supporting inline Base64 JPEG `image_url` inputs.
+
+### Option A: Configure In-App (Recommended)
+
+1. Launch Lumi and tap **Model** (`模型`) in the top bar.
+2. Enter your **Base URL** (e.g. `https://your-service.example/v1` — `/chat/completions` is appended automatically), **Model Name**, and **API Key**.
+3. Tap **Test Connection** to verify latency with a built-in `96 × 96` probe image, then tap **Save**.
+
+> **Transport & Local Testing:**  
+> Release builds enforce `HTTPS`. Debug builds also allow `HTTP` over trusted LAN (e.g. `http://192.168.1.20:3425/v1`) or USB via `adb reverse tcp:3425 tcp:3425` (`http://127.0.0.1:3425/v1`).
+
+### Option B: Debug Build Defaults (`local.properties`)
+
+For personal development, you can pre-populate debug defaults in your local (git-ignored) `local.properties`:
 
 ```properties
 LUMI_LLM_BASE_URL=https://your-service.example/v1
@@ -24,19 +125,53 @@ LUMI_LLM_MODEL=your-vision-model
 LUMI_LLM_API_KEY=your-local-test-key
 ```
 
-使用 `workbuddy/deepseek-v4.1-flash` 时，Lumi 按模型名关闭长推理。调试版的 `LumiRecommendation` 日志与私有 `recommendation_outcomes` 记录包含模型名、接口主机名以及准备、模型和本地核对耗时。最近两次判断保存在手机上，首次显示绿环后补记从点击到显示的总耗时。
+> **Security Note:** Never commit `local.properties` or distribute debug APKs containing personal API keys. In-app saved settings always take precedence; release builds start with an empty configuration.
 
-## 构建
+---
 
-需要 JDK 21、Android SDK Platform 36、Build Tools 36.0.0。通过 Android Studio、环境变量 `ANDROID_HOME` 或本机的 `local.properties` 指定 SDK 位置。本机 Android Studio 的 JDK 可用：
+## Roadmap
 
-```sh
-export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
-./gradlew :app:assembleDebug
-./gradlew :app:testDebugUnitTest
-./gradlew :app:lintDebug
+- [x] **Stage S1 — Core Hybrid Experience**
+  - On-device face/object candidate numbering, multi-person group framing & tap-to-select subject
+  - Optical zoom recommendations with seamless guidance carry-over
+  - Horizon level bar, haptic ready cue, auto-shoot toggle & anti-drift elevation anchoring
+  - 512 px / compact JSON cloud pipeline + subject-linked AF/AE focus & metering
+- [ ] **Stage S2 — Real-Time Photography Director**
+  - Single highest-priority director cue per scene (composition, background clearance, lighting, or 1-line portrait pose tip)
+  - Adjustable AI proactivity modes (`Quiet` / `Proactive` / `Manual`)
+  - 3-second post-shot mini review + zero-cost on-device aesthetic recrop suggestions
+- [ ] **Stage S3 — Spatial Moat & Aesthetic Memory**
+  - Cross-parallax **"step sideways / step closer"** guidance to clear background clutter
+  - Lightweight on-device personal framing preference memory
+
+For detailed strategy and architecture decisions, see [`plan_/11.26/2026-11-26_Lumi下一步产品与技术战略.md`](plan_/11.26/2026-11-26_Lumi下一步产品与技术战略.md).
+
+---
+
+## Project Structure
+
+```text
+Lumi/
+├── app/src/main/java/com/lumi/camera/
+│   ├── camera/        # CameraX session, optical zoom stops, sensor pose & geometry
+│   ├── guidance/      # Quaternion rotation guidance, horizon roll & steady-hold logic
+│   ├── shotplan/      # Candidate protocol, composition choices, VLM client & target anchoring
+│   ├── vision/        # ML Kit analyzer, MediaPipe segmentation, 2D SubjectTracker
+│   └── ui/            # Jetpack Compose viewfinder, zoom wheel, model settings & diagnostics
+├── app/src/test/      # Pure Kotlin unit tests (optics, guidance, protocol, tracker, fallback)
+├── tools/m1_framing/  # Standalone offline framing comparison utility
+├── plan_/             # Product strategy & milestone architecture docs
+└── AGENTS.md          # Engineering & Conventional Commit conventions
 ```
 
-APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。连接设备后用 `./gradlew :app:installDebug` 安装。
+---
 
-M1 的点选跟踪器仅保留为调试代码；[四边离线比对工具](tools/m1_framing/README.md)仍可单独运行。
+## On-Device Models & Attribution
+
+Foreground subject segmentation runs fully on-device using **MediaPipe Tasks Vision 0.10.35** with the bundled **Google Magic Touch v1** model:
+
+- **Model**: `magic_touch.tflite` (`6,227,884` bytes)
+- **SHA-256**: `e24338a717c1b7ad8d159666677ef400babb7f33b8ad60c4d96db4ecf694cd25`
+- **Resources**: [Model Source](https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite) · [Google Model Card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MagicTouch.pdf) · [Apache 2.0 License](app/src/main/assets/magic_touch.LICENSE.txt)
+
+Also includes [`tools/m1_framing`](tools/m1_framing/README.md) for offline framing evaluation.
