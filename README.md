@@ -140,9 +140,9 @@ LUMI_LLM_API_KEY=your-local-test-key
   - Single highest-priority director cue per scene (composition, background clearance, lighting, or 1-line portrait pose tip)
   - Adjustable AI proactivity modes (`Quiet` / `Proactive` / `Manual`)
   - 3-second post-shot mini review + zero-cost on-device aesthetic recrop suggestions (preserves original negative)
-- [ ] **Stage S3 — Spatial Moat & Aesthetic Memory**
-  - Cross-parallax **"step sideways / step closer"** guidance to clear background clutter
-  - Lightweight on-device personal framing preference memory
+- [x] **Stage S3 — Spatial Moat & Aesthetic Memory**
+  - Cross-parallax **"step sideways / step closer"** guidance with live background-anchor progress bar
+  - 4-dimension post-shot **"Good Photo" evaluation** (`Subject`, `Balance`, `Background`, `Naturalness`) + on-device personal aesthetic preference memory feeding the VLM prior
 
 For detailed strategy and architecture decisions, see [`plan_/11.26/2026-11-26_Lumi下一步产品与技术战略.md`](plan_/11.26/2026-11-26_Lumi下一步产品与技术战略.md).
 
