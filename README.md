@@ -136,10 +136,10 @@ LUMI_LLM_API_KEY=your-local-test-key
   - Optical zoom recommendations with seamless guidance carry-over
   - Horizon level bar, haptic ready cue, auto-shoot toggle & anti-drift elevation anchoring
   - 512 px / compact JSON cloud pipeline + subject-linked AF/AE focus & metering
-- [ ] **Stage S2 — Real-Time Photography Director**
+- [x] **Stage S2 — Real-Time Photography Director**
   - Single highest-priority director cue per scene (composition, background clearance, lighting, or 1-line portrait pose tip)
   - Adjustable AI proactivity modes (`Quiet` / `Proactive` / `Manual`)
-  - 3-second post-shot mini review + zero-cost on-device aesthetic recrop suggestions
+  - 3-second post-shot mini review + zero-cost on-device aesthetic recrop suggestions (preserves original negative)
 - [ ] **Stage S3 — Spatial Moat & Aesthetic Memory**
   - Cross-parallax **"step sideways / step closer"** guidance to clear background clutter
   - Lightweight on-device personal framing preference memory
