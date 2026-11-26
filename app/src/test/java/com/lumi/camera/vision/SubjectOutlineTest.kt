@@ -417,4 +417,42 @@ class SubjectOutlineTest {
         assertTrue(ChatProtocol.promptFor(CompositionPreset.RULE_OF_THIRDS).contains("left_third"))
         assertTrue(ChatProtocol.promptFor(CompositionPreset.SYMMETRY).contains("center"))
     }
+
+    @Test fun subjectTrackerHandlesExposureShiftAndDistanceScaleChangeWithoutDrifting() {
+        val pixels0 = image()
+        val outline = SubjectOutline.from(source, toy, pixels0, segment)!!
+        val tracker = SubjectTracker.from(outline, pixels0)!!
+
+        // Simulate +22 Y auto-exposure brightening on a stationary scene: must NOT drift.
+        val brighterRaw = IntArray(pixels0.width * pixels0.height) { idx ->
+            val x = (idx % pixels0.width + 0.5) / pixels0.width
+            val y = (idx / pixels0.width + 0.5) / pixels0.height
+            val c = pixels0.at(x, y)!!
+            val luma = ((c shr 16) + 22).coerceIn(0, 255)
+            (luma shl 16) or (c and 0xFFFF)
+        }
+        val aeShift = tracker.track(source.copy(timeNs = 60_000_000L), SubjectPixels(pixels0.width, pixels0.height, brighterRaw))
+        assertTrue("AE brightness change should still match cleanly", aeShift.matched)
+        assertEquals(0.0, aeShift.dx, 0.015)
+        assertEquals(0.0, aeShift.dy, 0.015)
+
+        // Simulate switching to 1.6x optical zoom while pulling phone back so apparent size is 0.78x of pure zoom.
+        val zoomedObs = source.copy(
+            timeNs = 120_000_000L,
+            lens = source.lens.copy(fx = source.lens.fx * 1.6, fy = source.lens.fy * 1.6),
+        )
+        // Render toy as if photographed at 1.25x effective magnification (1.6 * 0.78 = 1.248).
+        val pulledBackObs = source.copy(
+            timeNs = 120_000_000L,
+            lens = source.lens.copy(fx = source.lens.fx * 1.25, fy = source.lens.fy * 1.25),
+        )
+        val pulledBackPixels = image(pose = pulledBackObs)
+        var scaledShift = tracker.track(zoomedObs, pulledBackPixels)
+        // Run a couple frames so exponential smoothing settles toward true scale (~0.78).
+        for (i in 1..3) {
+            scaledShift = tracker.track(zoomedObs.copy(timeNs = 120_000_000L + i * 50_000_000L), pulledBackPixels)
+        }
+        assertTrue("pulled-back zoomed subject should match", scaledShift.matched)
+        assertTrue("tracker should adapt apparent scale below 0.90, got ${scaledShift.scale}", scaledShift.scale < 0.90)
+    }
 }

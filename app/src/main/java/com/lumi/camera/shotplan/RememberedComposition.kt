@@ -71,8 +71,9 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
     fun liveSubjectBounds(livePose: Pose, liveLens: Lens, shift: TrackedShift?): com.lumi.camera.vision.FaceBox? {
         val b0 = outline?.bounds ?: return null
         val center = predictedSubjectCenter(livePose, liveLens, shift) ?: return null
-        val w = ((b0.right - b0.left) * (liveLens.fx / backgroundSource.lens.fx)).coerceIn(0.05, 0.95)
-        val h = ((b0.bottom - b0.top) * (liveLens.fy / backgroundSource.lens.fy)).coerceIn(0.05, 0.95)
+        val apparentScale = (shift?.scale ?: 1.0).coerceIn(0.5, 1.6)
+        val w = ((b0.right - b0.left) * (liveLens.fx / backgroundSource.lens.fx) * apparentScale).coerceIn(0.05, 0.95)
+        val h = ((b0.bottom - b0.top) * (liveLens.fy / backgroundSource.lens.fy) * apparentScale).coerceIn(0.05, 0.95)
         val left = (center.x - w / 2.0).coerceIn(0.0, 0.95)
         val top = (center.y - h / 2.0).coerceIn(0.0, 0.95)
         val right = (center.x + w / 2.0).coerceIn(left + 0.05, 1.0)
@@ -91,8 +92,9 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
         val w0 = (b0.right - b0.left).coerceIn(0.01, 1.0)
         val h0 = (b0.bottom - b0.top).coerceIn(0.01, 1.0)
         val zoomScale = (liveLens.fx / backgroundSource.lens.fx).coerceAtLeast(0.5)
-        val liveW = (w0 * zoomScale).coerceIn(0.01, 1.0)
-        val liveH = (h0 * (liveLens.fy / backgroundSource.lens.fy)).coerceIn(0.01, 1.0)
+        val apparentScale = (shift?.scale ?: 1.0).coerceIn(0.5, 1.6)
+        val liveW = (w0 * zoomScale * apparentScale).coerceIn(0.01, 1.0)
+        val liveH = (h0 * (liveLens.fy / backgroundSource.lens.fy) * apparentScale).coerceIn(0.01, 1.0)
         val desired = CompositionChoice.desiredCenterFor(desired0, h0, liveW, liveH, choice)
         val anchorTargetPose = backgroundSource.pose * (backgroundSource.lens.lookAt(c0) * liveLens.lookAt(desired).inverse())
         val pitchDrift = kotlin.math.abs(livePose.elevationDeg(liveLens.front) - anchorTargetPose.elevationDeg(liveLens.front))

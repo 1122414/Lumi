@@ -190,6 +190,7 @@ internal class CameraSession(
     private var desiredZoom = 1f
     private var zoomGeneration = 0L
     private var zoomSinceNs = 0L
+    private var zoomSettleUntilNs = 0L
     private var logZoomFrame = true
     private var disposed = false
     private val drawDirection = object : Runnable {
@@ -381,7 +382,7 @@ internal class CameraSession(
             }
         }
         val shift = frame.shift
-        if (!faceTracked && shift != null) {
+        if (!faceTracked && shift != null && now >= zoomSettleUntilNs) {
             if (shift.matched) {
                 latestShift = shift
                 trackerLostSinceNs = null
@@ -478,9 +479,18 @@ internal class CameraSession(
             val shift = latestShift
             val shiftDx = if (shift != null) shift.dx * (lens.fx / shift.lens.fx) else 0.0
             val shiftDy = if (shift != null) shift.dy * (lens.fy / shift.lens.fy) else 0.0
+            val apparentScale = (shift?.scale ?: 1.0).coerceIn(0.55, 1.55)
+            val ob = outlineSource.bounds
+            val anchorCenter = projection.project(Uv((ob.left + ob.right) / 2.0, (ob.top + ob.bottom) / 2.0))
             outlineSource.capturePoints.map { point ->
                 point?.let(projection::project)?.let { p ->
-                    preview(Uv(p.x + shiftDx, p.y + shiftDy))
+                    val scaled = if (anchorCenter != null && abs(apparentScale - 1.0) > 0.01) {
+                        Uv(
+                            anchorCenter.x + (p.x - anchorCenter.x) * apparentScale,
+                            anchorCenter.y + (p.y - anchorCenter.y) * apparentScale,
+                        )
+                    } else p
+                    preview(Uv(scaled.x + shiftDx, scaled.y + shiftDy))
                 }
             }
         }
@@ -927,6 +937,8 @@ internal class CameraSession(
                 onMessage("相机未能切换倍率")
             }
             zoomSinceNs = SystemClock.elapsedRealtimeNanos()
+            zoomSettleUntilNs = zoomSinceNs + ZOOM_SETTLE_NS
+            trackerLostSinceNs = null
             logZoomFrame = true
             zoom = zoom.copy(ratio = appliedZoom, changing = false)
             onZoom(zoom)
@@ -1039,5 +1051,6 @@ internal class CameraSession(
 
     companion object {
         private const val SUBJECT_LOST_NS = 450_000_000L
+        private const val ZOOM_SETTLE_NS = 260_000_000L
     }
 }
