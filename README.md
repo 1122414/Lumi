@@ -143,6 +143,13 @@ LUMI_LLM_API_KEY=your-local-test-key
 - [x] **Stage S3 — Spatial Moat & Aesthetic Memory**
   - Cross-parallax **"step sideways / step closer"** guidance with live background-anchor progress bar
   - 4-dimension post-shot **"Good Photo" evaluation** (`Subject`, `Balance`, `Background`, `Naturalness`) + on-device personal aesthetic preference memory feeding the VLM prior
+- [x] **Stage S4 — Pro Exposure & Light Telemetry Layer**
+  - Real-time physical light telemetry (`ISO`, shutter speed, aperture, `EV`, ambient `Lux`, highlight/shadow clipping, and subject-vs-background backlit ratio) fed to the VLM director
+  - Three exposure control modes (`Auto` / `AI Auto` / `M Manual`) integrated with proactivity levels (confirmable `[Apply]` pill in `Manual` mode; smooth auto-apply + `[Revert]` in `Proactive` mode)
+  - Per-item `AUTO` semi-automatic priority in `M Manual` (`EV`, `ISO`, `S`, `WB`, plus hardware-gated aperture `F`), one-tap `Copy AI` and `All AUTO`
+- [ ] **Stage S5 — Reference Shot Coach (`Copy + Beyond-Copy`)**
+  - Optional reference photo upload with thumbnail + toggleable translucent ghost overlay
+  - Direct speakable portrait pose-correction cues + **beyond-copy upgrade suggestions** (same spot, better photo)
 
 For detailed strategy and architecture decisions, see [`plan_/11.26/2026-11-26_Lumi下一步产品与技术战略.md`](plan_/11.26/2026-11-26_Lumi下一步产品与技术战略.md).
 
