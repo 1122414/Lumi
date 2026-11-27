@@ -64,6 +64,8 @@ import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.CandidateOverlay
 import com.lumi.camera.camera.ExposureControlMode
+import com.lumi.camera.camera.NativeProcessingMode
+import com.lumi.camera.camera.NativeProcessingUiState
 import com.lumi.camera.camera.Viewfinder
 import com.lumi.camera.camera.ViewfinderLens
 import com.lumi.camera.camera.ViewfinderZoom
@@ -182,6 +184,12 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     var exposureMode by remember {
         mutableStateOf(ExposureControlMode.fromWire(uiPrefs.getString("exposure_mode", null)))
     }
+    var nativeProcessingMode by remember {
+        mutableStateOf(NativeProcessingMode.fromWire(uiPrefs.getString("native_processing_mode", null)))
+    }
+    var nativeProcessingState by remember {
+        mutableStateOf(NativeProcessingUiState(mode = nativeProcessingMode))
+    }
     var exposureState by remember { mutableStateOf(ExposureUiState(mode = exposureMode)) }
     var referenceState by remember { mutableStateOf(ReferenceUiState()) }
     var referenceDialogOpen by remember { mutableStateOf(false) }
@@ -215,8 +223,13 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
             onReference = { nextRef ->
                 referenceState = nextRef
             },
+            onNativeProcessing = { nextProc ->
+                nativeProcessingState = nextProc
+                nativeProcessingMode = nextProc.mode
+            },
             initialProactivity = proactivityMode,
-            initialExposureMode = exposureMode)
+            initialExposureMode = exposureMode,
+            initialNativeProcessing = nativeProcessingMode)
     }
     val pickReferenceLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),

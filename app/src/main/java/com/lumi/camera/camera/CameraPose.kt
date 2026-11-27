@@ -121,6 +121,13 @@ internal class CameraOptics(info: CameraInfo, private val readings: FocalReading
         )
     }
 
+    fun processingModes(): IspProcessingModes {
+        val edges = meta.getCameraCharacteristic(C.EDGE_AVAILABLE_EDGE_MODES)?.toSet() ?: emptySet()
+        val nr = meta.getCameraCharacteristic(C.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)?.toSet() ?: emptySet()
+        val scenes = meta.getCameraCharacteristic(C.CONTROL_AVAILABLE_SCENE_MODES)?.toSet() ?: emptySet()
+        return IspProcessingModes(edgeModes = edges, noiseReductionModes = nr, sceneModes = scenes)
+    }
+
     fun captureTimeNs(timestamp: Long): Long {
         // Some cameras use the uptime timebase. Never re-date a frame at detector completion.
         return if (realtime) timestamp else timestamp + (SystemClock.elapsedRealtimeNanos() - System.nanoTime())

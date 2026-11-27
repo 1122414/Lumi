@@ -27,6 +27,8 @@ import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ZoomState
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -133,10 +135,18 @@ internal class CameraSession(
     private val onCaptured: (PostShotReview) -> Unit = {},
     private val onExposure: (ExposureUiState) -> Unit = {},
     private val onReference: (ReferenceUiState) -> Unit = {},
+    private val onNativeProcessing: (NativeProcessingUiState) -> Unit = {},
     initialProactivity: ProactivityMode = ProactivityMode.MANUAL,
     initialExposureMode: ExposureControlMode = ExposureControlMode.AUTO,
+    initialNativeProcessing: NativeProcessingMode = NativeProcessingMode.NATIVE_AI,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
-    private data class Binding(val size: Extent, val rotation: Int, val lensFacing: Int)
+    private data class Binding(
+        val size: Extent,
+        val rotation: Int,
+        val lensFacing: Int,
+        val extensionMode: Int?,
+        val minimizeLatency: Boolean,
+    )
     private val context = view.context
     private val main = ContextCompat.getMainExecutor(context)
     private val handler = Handler(Looper.getMainLooper())
@@ -195,6 +205,9 @@ internal class CameraSession(
     private var poses: CameraPose? = null
     private var lightSensor: AmbientLightSensor? = null
     private var capabilities = CameraCapabilities()
+    private var nativeProcessingMode = initialNativeProcessing
+    private var nativeCapability = NativeProcessingCapability()
+    private var extensionsManager: ExtensionsManager? = null
     private var exposureMode = initialExposureMode
     private var manualExposure = ManualExposureSettings()
     private var pendingAiExposure: AiExposureSuggestion? = null
@@ -252,7 +265,13 @@ internal class CameraSession(
                     if (!hasBack && hasFront) lensFacing = CameraSelector.LENS_FACING_FRONT
                     canSwitchLens = hasBack && hasFront
                     onLens(ViewfinderLens(lensFacing == CameraSelector.LENS_FACING_FRONT, canSwitchLens))
-                    bind()
+                    val extFuture = ExtensionsManager.getInstanceAsync(context, cameraProvider)
+                    extFuture.addListener({
+                        if (!disposed) {
+                            extensionsManager = runCatching { extFuture.get() }.getOrNull()
+                            bind()
+                        }
+                    }, main)
                 } catch (e: Exception) {
                     Log.e("LumiCamera", "Camera provider unavailable", e)
                     onMessage("相机不可用，请检查权限和摄像头。")
@@ -266,31 +285,99 @@ internal class CameraSession(
     override fun onDisplayAdded(displayId: Int) = Unit
     override fun onDisplayRemoved(displayId: Int) = Unit
 
+    private fun probeSupportedExtensions(baseSelector: CameraSelector): Set<Int> {
+        val mgr = extensionsManager ?: return emptySet()
+        return buildSet {
+            for (mode in listOf(ExtensionMode.AUTO, ExtensionMode.HDR, ExtensionMode.NIGHT)) {
+                val ok = runCatching { mgr.isExtensionAvailable(baseSelector, mode) }.getOrDefault(false)
+                if (ok) add(mode)
+            }
+        }
+    }
+
+    private fun publishNativeProcessingState() {
+        onNativeProcessing(
+            NativeProcessingPolicy.uiState(nativeProcessingMode, exposureMode, nativeCapability)
+        )
+    }
+
+    fun setNativeProcessingMode(mode: NativeProcessingMode) {
+        if (nativeProcessingMode == mode) return
+        val previousPlan = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
+        nativeProcessingMode = mode
+        val nextPlan = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
+        publishNativeProcessingState()
+        if (previousPlan.extensionMode != nextPlan.extensionMode ||
+            previousPlan.minimizeCaptureLatency != nextPlan.minimizeCaptureLatency) {
+            bind()
+        } else {
+            applyExposureToHardware()
+        }
+        onMessage(
+            if (mode == NativeProcessingMode.PURE) "已切换至纯净原片（关闭本机 AI 优化）"
+            else "已开启本机 AI 成像优化"
+        )
+    }
+
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun bind() {
         val p = provider ?: return
         val rotation = view.display?.rotation ?: return
         if (disposed || !owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) ||
             view.width <= 0 || view.height <= 0) return
-        val next = Binding(Extent(view.width, view.height), rotation, lensFacing)
+        val front = lensFacing == CameraSelector.LENS_FACING_FRONT
+        val baseSelector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+        val supportedExts = probeSupportedExtensions(baseSelector)
+        val tentativeCap = nativeCapability.copy(supportedExtensions = supportedExts)
+        val initialPlan = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, tentativeCap)
+        val next = Binding(
+            size = Extent(view.width, view.height),
+            rotation = rotation,
+            lensFacing = lensFacing,
+            extensionMode = initialPlan.extensionMode,
+            minimizeLatency = initialPlan.minimizeCaptureLatency,
+        )
         if (next == binding) return
         val viewport = view.getViewPort(rotation) ?: return
         releaseBinding()
         val generation = frames.session
-        val front = lensFacing == CameraSelector.LENS_FACING_FRONT
-        val selector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+        val effectiveSelector = initialPlan.extensionMode?.let { extMode ->
+            runCatching { extensionsManager?.getExtensionEnabledCameraSelector(baseSelector, extMode) }
+                .getOrNull()
+        } ?: baseSelector
         val preview = Preview.Builder().setTargetRotation(rotation).build()
         val analysisBuilder = ImageAnalysis.Builder().setTargetRotation(rotation)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
         Camera2Interop.Extender(analysisBuilder).setSessionCaptureCallback(readings)
         val analysis = analysisBuilder.build()
-        val photo = ImageCapture.Builder().setTargetRotation(rotation).build()
+        val captureMode = if (initialPlan.minimizeCaptureLatency) {
+            ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+        } else {
+            ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+        }
+        val photo = ImageCapture.Builder()
+            .setTargetRotation(rotation)
+            .setCaptureMode(captureMode)
+            .build()
         preview.setSurfaceProvider(view.surfaceProvider)
         val group = UseCaseGroup.Builder().setViewPort(viewport)
             .addUseCase(preview).addUseCase(analysis).addUseCase(photo).build()
         uses = arrayOf(preview, analysis, photo)
         try {
-            val camera = p.bindToLifecycle(owner, selector, group)
+            var actualExtensionMode = initialPlan.extensionMode
+            var extensionBindFailed = false
+            val camera = try {
+                p.bindToLifecycle(owner, effectiveSelector, group)
+            } catch (e: RuntimeException) {
+                if (effectiveSelector !== baseSelector) {
+                    Log.w("LumiCamera", "Extension bind failed (mode=$actualExtensionMode), falling back to standard pipeline", e)
+                    actualExtensionMode = null
+                    extensionBindFailed = true
+                    p.bindToLifecycle(owner, baseSelector, group)
+                } else {
+                    throw e
+                }
+            }
             this.camera = camera
             appliedZoom = 1f
             val sensors = CameraPose(context, rotation)
@@ -301,6 +388,10 @@ internal class CameraSession(
             luxSensor.start()
             val optics = CameraOptics(camera.cameraInfo, readings)
             capabilities = optics.capabilities()
+            nativeCapability = NativeProcessingCapability(
+                supportedExtensions = if (extensionBindFailed) emptySet() else supportedExts,
+                isp = optics.processingModes(),
+            )
             val analyzer = CompositionAnalyzer(context, optics, sensors,
                 mirrored = front,
                 modelFrameReady = { token, sample -> main.execute { sendRecommendation(token, sample) } }) { result ->
@@ -311,10 +402,11 @@ internal class CameraSession(
             observer = analyzer
             analyzer.proactiveMonitor = proactivityMode == ProactivityMode.PROACTIVE
             analysis.setAnalyzer(worker, analyzer)
-            binding = next
+            binding = next.copy(extensionMode = actualExtensionMode)
             capture = photo
             applyExposureToHardware()
             publishExposureState()
+            publishNativeProcessingState()
             val lensStops = rearZoomStops(context, camera.cameraInfo)
             val ranges = Observer<ZoomState> { range ->
                 if (this.camera === camera && (zoom.min != range.minZoomRatio || zoom.max != range.maxZoomRatio)) {
@@ -732,6 +824,7 @@ internal class CameraSession(
 
     fun setExposureMode(mode: ExposureControlMode) {
         if (exposureMode == mode) return
+        val prevProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
         exposureMode = mode
         when (mode) {
             ExposureControlMode.AUTO -> {
@@ -746,19 +839,35 @@ internal class CameraSession(
                 appliedAiExposure = null
             }
         }
-        applyExposureToHardware()
-        publishExposureState()
+        val nextProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
+        publishNativeProcessingState()
+        if (prevProc.extensionMode != nextProc.extensionMode) {
+            if (nextProc.bypassedForManual) {
+                onMessage("M 手动挡已临时避让本机厂商扩展，确保手动参数生效")
+            }
+            bind()
+        } else {
+            applyExposureToHardware()
+            publishExposureState()
+        }
     }
 
     fun updateManualExposure(settings: ManualExposureSettings) {
         manualExposure = settings
+        val prevProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
         if (exposureMode != ExposureControlMode.MANUAL) {
             exposureMode = ExposureControlMode.MANUAL
         }
         appliedAiExposure = null
         pendingAiExposure = null
-        applyExposureToHardware()
-        publishExposureState()
+        val nextProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
+        publishNativeProcessingState()
+        if (prevProc.extensionMode != nextProc.extensionMode) {
+            bind()
+        } else {
+            applyExposureToHardware()
+            publishExposureState()
+        }
     }
 
     fun resetManualExposure() {
@@ -788,12 +897,19 @@ internal class CameraSession(
 
     fun applyLatestAiToManual() {
         val suggestion = latestAiExposure ?: return
+        val prevProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
         manualExposure = ExposureSolver.fromAiSuggestion(suggestion, capabilities)
         exposureMode = ExposureControlMode.MANUAL
         pendingAiExposure = null
         appliedAiExposure = null
-        applyExposureToHardware()
-        publishExposureState()
+        val nextProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
+        publishNativeProcessingState()
+        if (prevProc.extensionMode != nextProc.extensionMode) {
+            bind()
+        } else {
+            applyExposureToHardware()
+            publishExposureState()
+        }
         onMessage("已将 AI 建议填入 M 手动挡，可继续微调")
     }
 
@@ -951,6 +1067,23 @@ internal class CameraSession(
             options.setCaptureRequestOption(CaptureRequest.LENS_APERTURE, resolved.aperture)
         } else {
             options.clearCaptureRequestOption(CaptureRequest.LENS_APERTURE)
+        }
+
+        val processing = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
+        if (processing.sceneMode != null) {
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE, processing.sceneMode)
+        } else {
+            options.clearCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE)
+        }
+        if (processing.edgeMode != null) {
+            options.setCaptureRequestOption(CaptureRequest.EDGE_MODE, processing.edgeMode)
+        } else {
+            options.clearCaptureRequestOption(CaptureRequest.EDGE_MODE)
+        }
+        if (processing.noiseReductionMode != null) {
+            options.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, processing.noiseReductionMode)
+        } else {
+            options.clearCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE)
         }
 
         runCatching {
