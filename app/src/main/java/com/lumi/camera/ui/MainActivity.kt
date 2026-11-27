@@ -19,6 +19,10 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -27,6 +31,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -107,6 +113,7 @@ import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.CandidateOverlay
 import com.lumi.camera.camera.CaptureAspectRatio
+import com.lumi.camera.camera.CaptureQueueState
 import com.lumi.camera.camera.CloseupOverlay
 import com.lumi.camera.camera.DeviceOrientationHelper
 import com.lumi.camera.camera.ExposureControlMode
@@ -124,6 +131,8 @@ import com.lumi.camera.filter.FilterAdjuster
 import com.lumi.camera.filter.FilterPreset
 import com.lumi.camera.filter.FilterSelectionMode
 import com.lumi.camera.filter.FilterUiState
+import com.lumi.camera.gallery.GalleryPhotoItem
+import com.lumi.camera.gallery.LumiGalleryStore
 import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.guidance.PoseGuidance
 import com.lumi.camera.guidance.StepProgress
@@ -358,12 +367,26 @@ private fun ColumnScope.CameraScreen(
     var referenceState by remember { mutableStateOf(ReferenceUiState()) }
     var referenceDialogOpen by remember { mutableStateOf(false) }
     var lastReview by remember { mutableStateOf<PostShotReview?>(null) }
+    var activeReviewDialogTarget by remember { mutableStateOf<PostShotReview?>(null) }
     var reviewBannerVisible by remember { mutableStateOf(false) }
-    var reviewDialogOpen by remember { mutableStateOf(false) }
+    var galleryPhotos by remember { mutableStateOf<List<GalleryPhotoItem>>(emptyList()) }
+    var galleryViewerOpen by remember { mutableStateOf(false) }
+    var captureQueue by remember { mutableStateOf(CaptureQueueState()) }
     var autoShoot by remember { mutableStateOf(false) }
     var autoShootProgress by remember { mutableFloatStateOf(0f) }
     var autoShotFired by remember { mutableStateOf(false) }
     var wasReady by remember { mutableStateOf(false) }
+    var wasHorizonLevel by remember { mutableStateOf(false) }
+
+    fun refreshGallery() {
+        scope.launch {
+            galleryPhotos = withContext(Dispatchers.IO) { LumiGalleryStore.loadPhotos(context) }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        galleryPhotos = withContext(Dispatchers.IO) { LumiGalleryStore.loadPhotos(context) }
+    }
 
     fun setFailure(failed: Boolean) {
         if (lastFailed != failed) {
@@ -391,6 +414,7 @@ private fun ColumnScope.CameraScreen(
             onCaptured = { review ->
                 lastReview = review
                 reviewBannerVisible = true
+                refreshGallery()
             },
             onExposure = { nextExp ->
                 exposureState = nextExp
@@ -408,6 +432,9 @@ private fun ColumnScope.CameraScreen(
             },
             onControls = { nextControls ->
                 controlsState = nextControls
+            },
+            onCaptureQueue = { nextQueue ->
+                captureQueue = nextQueue
             },
             initialProactivity = proactivityMode,
             initialExposureMode = exposureMode,
@@ -496,7 +523,8 @@ private fun ColumnScope.CameraScreen(
         onDispose { listener.disable() }
     }
 
-    val anyDialogOpen = cameraSettingsOpen || modelSettingsOpen || diagnosticOpen || reviewDialogOpen || referenceDialogOpen
+    val anyDialogOpen = cameraSettingsOpen || modelSettingsOpen || diagnosticOpen ||
+        activeReviewDialogTarget != null || referenceDialogOpen || galleryViewerOpen
     DisposableEffect(owner, bound, zoom.changing, anyDialogOpen, timerOption, countdownRemaining) {
         owner.hardwareShutterHandler = if (!anyDialogOpen) {
             {
@@ -530,6 +558,17 @@ private fun ColumnScope.CameraScreen(
         }
         wasReady = frame.ready
         if (!frame.ready) autoShotFired = false
+    }
+
+    LaunchedEffect(frame.rollDeg) {
+        val roll = frame.rollDeg ?: return@LaunchedEffect
+        val absRoll = abs(roll)
+        if (!wasHorizonLevel && absRoll <= 0.8) {
+            wasHorizonLevel = true
+            hostView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        } else if (wasHorizonLevel && absRoll >= 2.2) {
+            wasHorizonLevel = false
+        }
     }
 
     LaunchedEffect(frame.ready, autoShoot, autoShotFired, frame.suggestedZoom, frame.stepProgress?.satisfied) {
@@ -1012,7 +1051,7 @@ private fun ColumnScope.CameraScreen(
                 Surface(
                     onClick = {
                         reviewBannerVisible = false
-                        reviewDialogOpen = true
+                        activeReviewDialogTarget = bannerReview
                     },
                     shape = RoundedCornerShape(18.dp),
                     color = LumiColors.GlassDark,
@@ -1215,11 +1254,19 @@ private fun ColumnScope.CameraScreen(
         ) {
             Box(Modifier.width(86.dp), contentAlignment = Alignment.CenterStart) {
                 Box(Modifier.graphicsLayer { rotationZ = uiIconRotation }) {
+                    val latestThumbUri = galleryPhotos.firstOrNull()?.uri ?: lastReview?.photoUri
+                    val thumbKey = galleryPhotos.firstOrNull()?.id ?: lastReview?.capturedAtMs ?: 0L
                     LastPhotoThumbSlot(
-                        review = lastReview,
+                        photoUri = latestThumbUri,
+                        cacheKey = thumbKey,
+                        processingCount = captureQueue.pendingCount,
                         onClick = {
                             reviewBannerVisible = false
-                            reviewDialogOpen = true
+                            if (galleryPhotos.isNotEmpty()) {
+                                galleryViewerOpen = true
+                            } else if (lastReview != null) {
+                                activeReviewDialogTarget = lastReview
+                            }
                         },
                     )
                 }
@@ -1318,14 +1365,51 @@ private fun ColumnScope.CameraScreen(
     if (diagnosticOpen && BuildConfig.DEBUG) {
         DiagnosticDialog(onDismiss = { diagnosticOpen = false })
     }
-    val activeReview = lastReview
-    if (reviewDialogOpen && activeReview != null) {
+    if (galleryViewerOpen && galleryPhotos.isNotEmpty()) {
+        LumiGalleryViewerDialog(
+            photos = galleryPhotos,
+            onOpenRecrop = { item ->
+                galleryViewerOpen = false
+                activeReviewDialogTarget = if (lastReview?.photoUri == item.uri) {
+                    lastReview
+                } else {
+                    PostShotRecrop.buildReview(
+                        photoUri = item.uri,
+                        subjectBounds = null,
+                        rollDeg = null,
+                        wasReady = false,
+                        reason = null,
+                        directorCue = null,
+                    )
+                }
+            },
+            onDeletePhoto = { item ->
+                scope.launch {
+                    val deleted = withContext(Dispatchers.IO) {
+                        LumiGalleryStore.deletePhoto(context, item.uri)
+                    }
+                    if (deleted) {
+                        if (lastReview?.photoUri == item.uri) lastReview = null
+                        galleryPhotos = galleryPhotos.filterNot { it.id == item.id }
+                        if (galleryPhotos.isEmpty()) galleryViewerOpen = false
+                        onMessage("已删除照片")
+                    } else {
+                        onMessage("未能删除该照片，请在系统相册中操作")
+                    }
+                }
+            },
+            onDismiss = { galleryViewerOpen = false },
+        )
+    }
+    val activeReview = activeReviewDialogTarget
+    if (activeReview != null) {
         PostShotReviewDialog(
             review = activeReview,
             preferenceSummary = session.preferenceSummary(),
-            onDismiss = { reviewDialogOpen = false },
+            onDismiss = { activeReviewDialogTarget = null },
             onSavedCopy = { proposalId, msg ->
                 session.recordRecropPreference(proposalId)
+                refreshGallery()
                 onMessage(msg)
             },
             onResetPreferences = session::resetPreferences,
@@ -1591,6 +1675,13 @@ private fun TactileShutterButton(
     autoShootProgress: Float,
     onClick: () -> Unit,
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val innerScale by animateFloatAsState(
+        targetValue = if (pressed) 0.89f else 1f,
+        animationSpec = tween(90),
+        label = "shutter press scale",
+    )
     val outerColor = when {
         !enabled -> LumiColors.Hairline
         ready -> LumiColors.Emerald
@@ -1600,7 +1691,13 @@ private fun TactileShutterButton(
         modifier = Modifier
             .size(74.dp)
             .clip(CircleShape)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            )
             .semantics { contentDescription = "拍照快门" },
         contentAlignment = Alignment.Center,
     ) {
@@ -1626,7 +1723,7 @@ private fun TactileShutterButton(
             }
             drawCircle(
                 color = if (enabled) Color.White else Color(0x66FFFFFF),
-                radius = radius - 5.dp.toPx(),
+                radius = (radius - 5.dp.toPx()) * innerScale,
                 center = center,
             )
         }
@@ -1634,46 +1731,79 @@ private fun TactileShutterButton(
 }
 
 @Composable
-private fun LastPhotoThumbSlot(review: PostShotReview?, onClick: () -> Unit) {
-    if (review == null) {
-        Box(
-            modifier = Modifier
-                .size(46.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0x16FFFFFF))
-                .border(1.dp, LumiColors.Hairline, RoundedCornerShape(12.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            ReferenceFrameIcon(tint = LumiColors.TextMuted, size = 18.dp)
-        }
-        return
-    }
+private fun LastPhotoThumbSlot(
+    photoUri: Uri?,
+    cacheKey: Long,
+    processingCount: Int,
+    onClick: () -> Unit,
+) {
+    val infinite = rememberInfiniteTransition(label = "capture queue ring")
+    val spinDeg by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+        label = "capture spin",
+    )
     val context = LocalContext.current
-    val thumb by produceState<android.graphics.Bitmap?>(null, review.photoUri, review.capturedAtMs) {
-        value = withContext(Dispatchers.IO) {
-            PostShotRecrop.loadPreviewBitmap(context, review.photoUri, maxEdge = 160)
+    val thumb by produceState<android.graphics.Bitmap?>(null, photoUri, cacheKey) {
+        value = if (photoUri == null) null else withContext(Dispatchers.IO) {
+            PostShotRecrop.loadPreviewBitmap(context, photoUri, maxEdge = 160)
         }
     }
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        color = Color(0x22FFFFFF),
-        border = BorderStroke(1.dp, LumiColors.HairlineStrong),
-        modifier = Modifier
-            .size(46.dp)
-            .semantics { contentDescription = "打开上次成片轻复盘与二次构图" },
-    ) {
-        val bmp = thumb
-        if (bmp != null) {
-            Image(
-                bitmap = bmp.asImageBitmap(),
-                contentDescription = "上次拍摄缩略图",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
+
+    Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+        if (photoUri == null) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0x16FFFFFF))
+                    .border(1.dp, LumiColors.Hairline, RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                ReferenceFrameIcon(tint = LumiColors.TextMuted, size = 18.dp)
+            }
         } else {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("复盘", color = LumiColors.Ivory, fontSize = 10.sp)
+            Surface(
+                onClick = onClick,
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0x22FFFFFF),
+                border = BorderStroke(
+                    width = 1.dp,
+                    color = if (processingCount > 0) LumiColors.Ivory else LumiColors.HairlineStrong,
+                ),
+                modifier = Modifier
+                    .size(46.dp)
+                    .semantics { contentDescription = "打开 Lumi 相册与精裁复盘" },
+            ) {
+                val bmp = thumb
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = "最新照片缩略图",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        ReferenceFrameIcon(tint = LumiColors.Ivory, size = 18.dp)
+                    }
+                }
+            }
+        }
+
+        if (processingCount > 0) {
+            Canvas(Modifier.fillMaxSize()) {
+                val stroke = 2.dp.toPx()
+                drawArc(
+                    color = LumiColors.Ivory,
+                    startAngle = spinDeg,
+                    sweepAngle = 110f,
+                    useCenter = false,
+                    topLeft = Offset(stroke / 2f, stroke / 2f),
+                    size = Size(size.width - stroke, size.height - stroke),
+                    style = Stroke(width = stroke, cap = StrokeCap.Round),
+                )
             }
         }
     }

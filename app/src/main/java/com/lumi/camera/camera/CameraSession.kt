@@ -164,6 +164,7 @@ internal class CameraSession(
     private val onNativeProcessing: (NativeProcessingUiState) -> Unit = {},
     private val onFilter: (FilterUiState) -> Unit = {},
     private val onControls: (CameraControlsUiState) -> Unit = {},
+    private val onCaptureQueue: (CaptureQueueState) -> Unit = {},
     initialProactivity: ProactivityMode = ProactivityMode.MANUAL,
     initialExposureMode: ExposureControlMode = ExposureControlMode.AUTO,
     initialNativeProcessing: NativeProcessingMode = NativeProcessingMode.NATIVE_AI,
@@ -186,6 +187,11 @@ internal class CameraSession(
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private val network = Executors.newCachedThreadPool()
+    private val capturePipeline = CapturePipeline(
+        maxPending = 4,
+        callbackExecutor = main,
+        onStateChanged = { state -> if (!disposed) onCaptureQueue(state) },
+    )
     private val requests = RecommendationRequests(initialConfig)
     private var call: VisionChat? = null
     private var requestGeometry: FrameGeometry? = null
@@ -263,6 +269,7 @@ internal class CameraSession(
     private var quickEvSteps = 0f
     private var flashOption = initialFlash
     private var hasFlashUnit = false
+    private var torchEnabled = false
     private var aspectRatio = initialAspectRatio
     private var deviceSurfaceRotation = Surface.ROTATION_0
     private var pendingAiExposure: AiExposureSuggestion? = null
@@ -453,6 +460,7 @@ internal class CameraSession(
         val photo = ImageCapture.Builder()
             .setTargetRotation(rotation)
             .setCaptureMode(captureMode)
+            .setFlashMode(flashOption.toImageCaptureFlashMode())
             .build()
         preview.setSurfaceProvider(view.surfaceProvider)
         val filterEffect = PreviewFilterEffect().also {
@@ -1215,7 +1223,8 @@ internal class CameraSession(
 
         val options = CaptureRequestOptions.Builder()
         if (resolved.aeAuto) {
-            options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            // Clear AE_MODE override so CameraX ImageCapture owns ON / ON_AUTO_FLASH / ON_ALWAYS_FLASH.
+            options.clearCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE)
             options.clearCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY)
             options.clearCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME)
             runCatching { cam.cameraControl.setExposureCompensationIndex(resolved.evIndex) }
@@ -1236,7 +1245,7 @@ internal class CameraSession(
                 ExposureSolver.kelvinToRggbVector(resolved.wbKelvin),
             )
         } else {
-            options.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            options.clearCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE)
             options.clearCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_MODE)
             options.clearCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_GAINS)
         }
@@ -1276,10 +1285,15 @@ internal class CameraSession(
         val photo = capture
         if (!hasFlashUnit) {
             photo?.flashMode = ImageCapture.FLASH_MODE_OFF
+            torchEnabled = false
             return
         }
+        val wantTorch = flashOption.usesTorch
+        if (wantTorch != torchEnabled) {
+            torchEnabled = wantTorch
+            runCatching { cam.cameraControl.enableTorch(wantTorch) }
+        }
         photo?.flashMode = flashOption.toImageCaptureFlashMode()
-        runCatching { cam.cameraControl.enableTorch(flashOption.usesTorch) }
     }
 
     private fun publishControlsState() {
@@ -1304,6 +1318,10 @@ internal class CameraSession(
         flashOption = flashOption.next()
         applyFlashToHardware()
         publishControlsState()
+        if (exposureMode == ExposureControlMode.MANUAL &&
+            (flashOption == FlashOption.AUTO || flashOption == FlashOption.ON)) {
+            onMessage("M 手动挡下请用「常亮补光」或切回自动曝光以触发闪光")
+        }
         return flashOption
     }
 
@@ -1754,7 +1772,7 @@ internal class CameraSession(
         val activeAspect = aspectRatio
         val frontMirror = lensFacing == CameraSelector.LENS_FACING_FRONT
         photo.targetRotation = deviceSurfaceRotation
-        applyFlashToHardware()
+        photo.flashMode = if (hasFlashUnit) flashOption.toImageCaptureFlashMode() else ImageCapture.FLASH_MODE_OFF
 
         fun finishSaved(uri: Uri?) {
             if (disposed) return
@@ -1781,6 +1799,10 @@ internal class CameraSession(
         }
 
         if (!activeGrade.isIdentity || activeAspect != CaptureAspectRatio.RATIO_3_4) {
+            if (capturePipeline.pendingCount >= 4) {
+                onMessage("正在处理前几张照片，请稍候…")
+                return
+            }
             photo.takePicture(worker, object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     val rotationDeg = image.imageInfo.rotationDegrees
@@ -1790,21 +1812,28 @@ internal class CameraSession(
                     } finally {
                         image.close()
                     }
-                    val savedUri = runCatching {
-                        PhotoFilterRenderer.saveFilteredJpeg(
-                            context = context,
-                            jpegBytes = bytes,
-                            grade = activeGrade,
-                            mirrorHorizontal = frontMirror,
-                            fallbackRotationDegrees = rotationDeg,
-                            aspectRatio = activeAspect,
-                        )
-                    }.getOrNull()
-                    main.execute {
-                        if (savedUri != null) {
-                            finishSaved(savedUri)
-                        } else if (!disposed) {
-                            onMessage("保存失败，请检查相册权限和存储空间。")
+                    val accepted = capturePipeline.submit(
+                        work = {
+                            PhotoFilterRenderer.saveFilteredJpeg(
+                                context = context,
+                                jpegBytes = bytes,
+                                grade = activeGrade,
+                                mirrorHorizontal = frontMirror,
+                                fallbackRotationDegrees = rotationDeg,
+                                aspectRatio = activeAspect,
+                            )
+                        },
+                        onComplete = { savedUri ->
+                            if (savedUri != null) {
+                                finishSaved(savedUri)
+                            } else if (!disposed) {
+                                onMessage("保存失败，请检查相册权限和存储空间。")
+                            }
+                        },
+                    )
+                    if (!accepted) {
+                        main.execute {
+                            if (!disposed) onMessage("正在处理前几张照片，请稍候…")
                         }
                     }
                 }
@@ -1847,7 +1876,10 @@ internal class CameraSession(
     private fun releaseBinding() {
         zoomObserver?.let { camera?.cameraInfo?.zoomState?.removeObserver(it) }
         zoomObserver = null
-        runCatching { camera?.cameraControl?.enableTorch(false) }
+        if (torchEnabled) {
+            runCatching { camera?.cameraControl?.enableTorch(false) }
+            torchEnabled = false
+        }
         zoomGeneration++
         zoomSinceNs = 0L
         logZoomFrame = true
@@ -1902,6 +1934,7 @@ internal class CameraSession(
         view.removeOnLayoutChangeListener(layout)
         displays.unregisterDisplayListener(this)
         releaseBinding()
+        capturePipeline.close()
         worker.shutdown()
         network.shutdown()
     }
