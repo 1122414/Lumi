@@ -16,12 +16,18 @@ internal fun chatEndpoint(value: String, debug: Boolean): URL? = runCatching {
     }
 }.getOrNull()
 
-internal data class ModelConfig(val address: String = "", val model: String = "", val apiKey: String = "") {
+internal data class ModelConfig(
+    val address: String = "",
+    val model: String = "",
+    val apiKey: String = "",
+    val managedGateway: Boolean = false,
+) {
     fun validationError(debug: Boolean): String? = when {
         address.isBlank() -> "请填写接口地址。"
         chatEndpoint(address, debug) == null -> if (debug) "请填写有效的 HTTP 或 HTTPS 接口地址。" else "请填写有效的 HTTPS 接口地址。"
         model.isBlank() || model.any(Char::isISOControl) -> "请填写有效的模型名。"
-        apiKey.isBlank() || apiKey.any { it.code !in 33..126 } -> "请填写有效的 API key。"
+        !managedGateway && (apiKey.isBlank() || apiKey.any { it.code !in 33..126 }) -> "请填写有效的 API key。"
+        managedGateway && apiKey.any { it.code !in 33..126 } -> "网关令牌格式无效。"
         else -> null
     }
 
@@ -33,9 +39,14 @@ internal data class ModelConfig(val address: String = "", val model: String = ""
     override fun toString() = "ModelConfig(已隐藏)"
 }
 
-internal fun initialModelConfig(hasSaved: Boolean, debug: Boolean,
-    saved: () -> ModelConfig, defaults: () -> ModelConfig): ModelConfig = when {
+internal fun initialModelConfig(
+    hasSaved: Boolean,
+    debug: Boolean,
+    saved: () -> ModelConfig,
+    defaults: () -> ModelConfig,
+    managedGateway: () -> ModelConfig? = { null },
+): ModelConfig = when {
     hasSaved -> saved()
     debug -> defaults()
-    else -> ModelConfig()
+    else -> managedGateway() ?: ModelConfig()
 }

@@ -7,9 +7,30 @@ plugins {
 }
 
 val modelSettings = listOf("LUMI_LLM_BASE_URL", "LUMI_LLM_MODEL", "LUMI_LLM_API_KEY")
+val gatewaySettings = listOf("LUMI_GATEWAY_URL", "LUMI_GATEWAY_MODEL")
 val localSettings = Properties().apply {
     rootProject.file("local.properties").takeIf { it.isFile }?.reader()?.use { load(it) }
 }
+
+fun buildSetting(key: String): String {
+    val raw = System.getenv(key)?.takeIf { it.isNotBlank() } ?: localSettings.getProperty(key).orEmpty()
+    val clean = raw.trim().takeUnless { s -> s.any(Char::isISOControl) }.orEmpty()
+    return "\"" + clean.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+}
+
+val releaseStoreFilePath = System.getenv("LUMI_SIGNING_STORE_FILE")
+    ?: localSettings.getProperty("LUMI_SIGNING_STORE_FILE").orEmpty()
+val releaseStorePassword = System.getenv("LUMI_SIGNING_STORE_PASSWORD")
+    ?: localSettings.getProperty("LUMI_SIGNING_STORE_PASSWORD").orEmpty()
+val releaseKeyAlias = System.getenv("LUMI_SIGNING_KEY_ALIAS")
+    ?: localSettings.getProperty("LUMI_SIGNING_KEY_ALIAS").orEmpty()
+val releaseKeyPassword = System.getenv("LUMI_SIGNING_KEY_PASSWORD")
+    ?: localSettings.getProperty("LUMI_SIGNING_KEY_PASSWORD").orEmpty()
+val hasReleaseSigning = releaseStoreFilePath.isNotBlank() &&
+    file(releaseStoreFilePath).isFile &&
+    releaseStorePassword.isNotBlank() &&
+    releaseKeyAlias.isNotBlank() &&
+    releaseKeyPassword.isNotBlank()
 
 android {
     namespace = "com.lumi.camera"
@@ -20,16 +41,42 @@ android {
         applicationId = "com.lumi.camera"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 5
+        versionName = "0.5.0"
         modelSettings.forEach { buildConfigField("String", it, "\"\"") }
+        gatewaySettings.forEach { buildConfigField("String", it, buildSetting(it)) }
     }
-    buildTypes.named("debug") {
-        modelSettings.forEach { key ->
-            val value = localSettings.getProperty(key).orEmpty().trim().takeUnless { s -> s.any(Char::isISOControl) }.orEmpty()
-            buildConfigField("String", key, "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStoreFilePath)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
         }
     }
+
+    buildTypes {
+        named("debug") {
+            modelSettings.forEach { key ->
+                buildConfigField("String", key, buildSetting(key))
+            }
+        }
+        named("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -37,7 +84,6 @@ android {
     }
 }
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
-
 dependencies {
     val cameraX = "1.5.2"
     implementation("androidx.camera:camera-camera2:$cameraX")

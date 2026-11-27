@@ -61,10 +61,11 @@ internal object NativeProcessingPolicy {
         mode: NativeProcessingMode,
         exposureMode: ExposureControlMode,
         capability: NativeProcessingCapability,
+        quirks: DeviceQuirkProfile = DeviceQuirks.current(),
     ): ResolvedProcessingPlan {
         if (mode == NativeProcessingMode.NATIVE_AI) {
-            val preferred = capability.preferredExtensionMode
-            if (preferred != null && exposureMode == ExposureControlMode.MANUAL) {
+            val preferred = capability.preferredExtensionMode.takeIf { quirks.allowVendorExtensions }
+            if (preferred != null && exposureMode == ExposureControlMode.MANUAL && quirks.strictManualExtensionBypass) {
                 return ResolvedProcessingPlan(
                     extensionMode = null,
                     bypassedForManual = true,

@@ -16,18 +16,30 @@ import javax.crypto.spec.GCMParameterSpec
 internal class ModelConfigStore(context: Context) {
     private val prefs = context.getSharedPreferences("model_settings", Context.MODE_PRIVATE)
 
-    fun read(): ModelConfig = initialModelConfig(prefs.contains("ciphertext"), BuildConfig.DEBUG, saved = {
-        // A restored preference file can outlive its Keystore key. Keep the endpoint editable.
-        val apiKey = try {
-            val key = checkNotNull(storedKey())
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, decode("iv")))
-            cipher.doFinal(decode("ciphertext")).toString(Charsets.UTF_8)
-        } catch (_: Exception) { "" }
-        ModelConfig(prefs.getString("address", "").orEmpty(), prefs.getString("model", "").orEmpty(), apiKey)
-    }, defaults = {
-        ModelConfig(BuildConfig.LUMI_LLM_BASE_URL, BuildConfig.LUMI_LLM_MODEL, BuildConfig.LUMI_LLM_API_KEY)
-    })
+    fun read(): ModelConfig = initialModelConfig(
+        hasSaved = prefs.contains("ciphertext"),
+        debug = BuildConfig.DEBUG,
+        saved = {
+            // A restored preference file can outlive its Keystore key. Keep the endpoint editable.
+            val apiKey = try {
+                val key = checkNotNull(storedKey())
+                val cipher = Cipher.getInstance(TRANSFORMATION)
+                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, decode("iv")))
+                cipher.doFinal(decode("ciphertext")).toString(Charsets.UTF_8)
+            } catch (_: Exception) { "" }
+            ModelConfig(prefs.getString("address", "").orEmpty(), prefs.getString("model", "").orEmpty(), apiKey)
+        },
+        defaults = {
+            ModelConfig(BuildConfig.LUMI_LLM_BASE_URL, BuildConfig.LUMI_LLM_MODEL, BuildConfig.LUMI_LLM_API_KEY)
+        },
+        managedGateway = {
+            val gwUrl = BuildConfig.LUMI_GATEWAY_URL
+            val gwModel = BuildConfig.LUMI_GATEWAY_MODEL.ifBlank { "lumi-director" }
+            if (gwUrl.isNotBlank()) {
+                ModelConfig(address = gwUrl, model = gwModel, apiKey = "", managedGateway = true)
+            } else null
+        },
+    )
 
     // The IO worker checks commit's result before the camera switches configurations.
     @SuppressLint("ApplySharedPref", "UseKtx")

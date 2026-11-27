@@ -76,7 +76,10 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
             conn.useCaches = false
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             conn.setRequestProperty("Connection", "keep-alive")
-            conn.setRequestProperty("Authorization", "Bearer " + config.apiKey)
+            conn.setRequestProperty("X-Lumi-Client", "android/${BuildConfig.VERSION_NAME}")
+            if (config.apiKey.isNotBlank()) {
+                conn.setRequestProperty("Authorization", "Bearer " + config.apiKey)
+            }
             conn.setFixedLengthStreamingMode(payload.size)
             conn.outputStream.use { it.write(payload) }
             remainingMs()

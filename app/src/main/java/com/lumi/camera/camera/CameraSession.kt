@@ -58,6 +58,7 @@ import com.lumi.camera.guidance.RotationGuidance
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.guidance.StepProgress
 import com.lumi.camera.guidance.Uv
+import com.lumi.camera.observability.LumiTelemetry
 import com.lumi.camera.shotplan.AestheticPreferenceStore
 import com.lumi.camera.shotplan.AiExposureSuggestion
 import com.lumi.camera.shotplan.CompositionChoice
@@ -593,6 +594,7 @@ internal class CameraSession(
     }
 
     private fun receive(frame: SceneFrame) {
+        LumiTelemetry.markFirstViewfinderFrame()
         if (zoom.changing || frame.capturedNs < zoomSinceNs) return
         if (frame.observation != null) {
             latestLens = frame.observation.lens
@@ -854,6 +856,9 @@ internal class CameraSession(
                 stepSatisfiedSinceNs = null
                 rawStep
             }
+        }
+        if (guide.ready && !lastReadyState) {
+            LumiTelemetry.recordGuidanceReady()
         }
         lastReadyState = guide.ready
         onFrame(Viewfinder(
@@ -1530,6 +1535,7 @@ internal class CameraSession(
         }
         val capturedZoom = appliedZoom
         val hasBaseline = applyOfflineBaseline(source, sample, capturedZoom)
+        LumiTelemetry.recordAiTriggered(hasBaseline)
         val cloudConfigured = token.config.validationError(BuildConfig.DEBUG) == null
         if (!cloudConfigured) {
             sample.close()
@@ -1641,6 +1647,7 @@ internal class CameraSession(
         pendingTapPreview = null
         val hadOfflineBaseline = run?.target?.isOfflineBaseline == true
         if (completion == RecommendationRequests.Completion.EXPIRED) {
+            LumiTelemetry.recordCloudOutcome(succeeded = false)
             saveDiagnostic("EXPIRED", times, SystemClock.elapsedRealtimeNanos(), sentJpeg, capturedFront, capturedZoom, source.observation, result.getOrNull(), result.exceptionOrNull(), attempt, candidateCount, userTapped)
             if (hadOfflineBaseline) {
                 onRecommendationStatus(null)
@@ -1653,6 +1660,7 @@ internal class CameraSession(
         }
         val reply = result.getOrElse {
             val decided = SystemClock.elapsedRealtimeNanos()
+            LumiTelemetry.recordCloudOutcome(succeeded = false)
             recordDecision("REQUEST_FAILED", times, decided)
             saveDiagnostic("REQUEST_FAILED", times, decided, sentJpeg, capturedFront, capturedZoom, source.observation, null, it, attempt, candidateCount, userTapped)
             if (hadOfflineBaseline) {
@@ -1760,6 +1768,10 @@ internal class CameraSession(
             }
         }
         val decided = SystemClock.elapsedRealtimeNanos()
+        LumiTelemetry.recordCloudOutcome(
+            succeeded = true,
+            latencyMs = (times.replied - times.sent).coerceAtLeast(0L) / 1_000_000L,
+        )
         recordDecision("ACCEPTED", times, decided)
         saveDiagnostic("ACCEPTED", times, decided, sentJpeg, capturedFront, capturedZoom, source.observation, reply, null, attempt, candidateCount, userTapped)
         if (BuildConfig.DEBUG) Log.i("LumiRecommendation", token.config.safeText("aimPoint=(${plan.aimPoint.x},${plan.aimPoint.y}) " +
@@ -1889,8 +1901,15 @@ internal class CameraSession(
         photo.targetRotation = deviceSurfaceRotation
         photo.flashMode = if (hasFlashUnit) flashOption.toImageCaptureFlashMode() else ImageCapture.FLASH_MODE_OFF
 
-        fun finishSaved(uri: Uri?) {
+        val shutterStartedMs = SystemClock.elapsedRealtime()
+        fun finishSaved(uri: Uri?, filterSaveMs: Long? = null) {
             if (disposed) return
+            val shutterElapsedMs = (SystemClock.elapsedRealtime() - shutterStartedMs).coerceAtLeast(0L)
+            LumiTelemetry.recordCapture(
+                wasReady = captureReady,
+                shutterLatencyMs = shutterElapsedMs,
+                filterSaveMs = filterSaveMs,
+            )
             proactiveTrigger.onManualOrCaptured(SystemClock.elapsedRealtimeNanos(), capturePose)
             aestheticPrefs.recordComposition(captureChoice, captureZoom)
             if (uri != null) {
@@ -1942,7 +1961,8 @@ internal class CameraSession(
                     }
                     val accepted = capturePipeline.submit(
                         work = {
-                            PhotoFilterRenderer.saveFilteredJpeg(
+                            val filterStartMs = SystemClock.elapsedRealtime()
+                            val saved = PhotoFilterRenderer.saveFilteredJpeg(
                                 context = context,
                                 jpegBytes = bytes,
                                 grade = activeGrade,
@@ -1950,10 +1970,13 @@ internal class CameraSession(
                                 fallbackRotationDegrees = rotationDeg,
                                 aspectRatio = activeAspect,
                             )
+                            saved to (SystemClock.elapsedRealtime() - filterStartMs).coerceAtLeast(0L)
                         },
-                        onComplete = { savedUri ->
+                        onComplete = { outcome ->
+                            val savedUri = outcome?.first
+                            val filterMs = outcome?.second
                             if (savedUri != null) {
-                                finishSaved(savedUri)
+                                finishSaved(savedUri, filterSaveMs = filterMs)
                             } else if (!disposed) {
                                 onMessage("保存失败，请检查相册权限和存储空间。")
                             }

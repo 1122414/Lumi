@@ -36,14 +36,17 @@ import com.lumi.camera.camera.NativeProcessingUiState
 internal fun CameraSettingsDialog(
     nativeProcessingState: NativeProcessingUiState,
     showGrid: Boolean,
+    showModelConfigEntry: Boolean,
     modelSummary: String,
     modelStatusLabel: String,
     modelStatusColor: Color,
     preferenceSummary: String,
+    telemetrySummary: String,
     canRememberComposition: Boolean,
     onSetNativeProcessing: (NativeProcessingMode) -> Unit,
     onToggleGrid: (Boolean) -> Unit,
     onOpenModelSettings: () -> Unit,
+    onOpenPrivacyHealth: () -> Unit,
     onResetPreferences: () -> Unit,
     onRememberComposition: () -> Unit,
     onOpenDiagnostics: () -> Unit,
@@ -153,36 +156,38 @@ internal fun CameraSettingsDialog(
 
                 HorizontalDivider(color = LumiColors.Hairline)
 
-                // 3. Vision Model configuration
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0x12FFFFFF))
-                        .clickable {
-                            onDismiss()
-                            onOpenModelSettings()
+                // 3. Vision Model configuration (hidden in Release when managed BFF gateway is active)
+                if (showModelConfigEntry) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0x12FFFFFF))
+                            .clickable {
+                                onDismiss()
+                                onOpenModelSettings()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text("云端视觉模型", color = LumiColors.TextPrimary, fontSize = 14.sp)
+                            Text(
+                                text = modelSummary,
+                                color = LumiColors.TextMuted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text("云端视觉模型", color = LumiColors.TextPrimary, fontSize = 14.sp)
                         Text(
-                            text = modelSummary,
-                            color = LumiColors.TextMuted,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            text = "$modelStatusLabel ›",
+                            color = modelStatusColor,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
                         )
                     }
-                    Text(
-                        text = "$modelStatusLabel ›",
-                        color = modelStatusColor,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
                 }
 
                 // 4. Local aesthetic preference memory
@@ -204,6 +209,40 @@ internal fun CameraSettingsDialog(
                     TextButton(onClick = onResetPreferences) {
                         Text("重置", color = LumiColors.Ivory, fontSize = 12.sp)
                     }
+                }
+
+                HorizontalDivider(color = LumiColors.Hairline)
+
+                // 5. Privacy, Device Compatibility & Session Health
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0x10FFFFFF))
+                        .clickable {
+                            onDismiss()
+                            onOpenPrivacyHealth()
+                        }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("隐私说明与运行健康", color = LumiColors.TextPrimary, fontSize = 13.sp)
+                        Text(
+                            text = telemetrySummary,
+                            color = LumiColors.TextMuted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text(
+                        text = "v${BuildConfig.VERSION_NAME} ›",
+                        color = LumiColors.Ivory,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
                 }
 
                 if (BuildConfig.DEBUG) {
