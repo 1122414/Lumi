@@ -265,6 +265,8 @@ internal object FilterAdjuster {
             glow = max(0f, base.glow + totalDelta.glow),
             grain = max(0f, base.grain + totalDelta.grain),
             intensity = clampedIntensity,
+            lutPresetId = resolvedPreset.id,
+            lutStrength = 0.80f,
         ).clamped()
 
         val reason = when {

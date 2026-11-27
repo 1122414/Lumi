@@ -33,6 +33,10 @@ internal object FilterShader {
         }
         return """
             $header
+            uniform sampler2D uLutTexture;
+            uniform float uLutSize;
+            uniform float uLutStrength;
+
             varying vec2 vTexCoord;
 
             uniform float uIntensity;
@@ -58,15 +62,36 @@ internal object FilterShader {
                 return dot(c, vec3(0.299, 0.587, 0.114));
             }
 
-            float skinMask(vec3 c) {
-                float mx = max(c.r, max(c.g, c.b));
-                float mn = min(c.r, min(c.g, c.b));
-                float sat = mx - mn;
-                float warm = smoothstep(0.02, 0.16, c.r - c.g) * smoothstep(0.02, 0.18, c.g - c.b);
-                float lum = lumaOf(c);
-                float lumOk = smoothstep(0.14, 0.30, lum) * (1.0 - smoothstep(0.84, 0.96, lum));
-                float satOk = smoothstep(0.04, 0.14, sat) * (1.0 - smoothstep(0.55, 0.78, sat));
-                return clamp(warm * lumOk * satOk, 0.0, 1.0);
+            // BT.601 YCbCr chrominance ellipse skin mask (accurate across fair/warm/olive/deep skin tones)
+            float skinMaskYCbCr(vec3 c) {
+                float y = lumaOf(c);
+                float cb = 0.5 - 0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b;
+                float cr = 0.5 + 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b;
+                float dCb = (cb - 0.415) / 0.085;
+                float dCr = (cr - 0.600) / 0.075;
+                float ellipse = exp(-0.5 * (dCb * dCb + dCr * dCr));
+                float lumOk = smoothstep(0.12, 0.26, y) * (1.0 - smoothstep(0.86, 0.97, y));
+                float warmOk = smoothstep(0.015, 0.08, c.r - c.b);
+                return clamp(ellipse * lumOk * warmOk, 0.0, 1.0);
+            }
+
+            // True trilinear 3D LUT lookup packed into a (N*N) x N 2D strip texture
+            vec3 sampleLut3D(vec3 c) {
+                float n = uLutSize;
+                float maxIdx = n - 1.0;
+                vec3 clamped = clamp(c, 0.0, 1.0);
+                float blueScaled = clamped.b * maxIdx;
+                float b0 = floor(blueScaled);
+                float b1 = min(b0 + 1.0, maxIdx);
+                float db = blueScaled - b0;
+
+                float sliceW = 1.0 / n;
+                float uOff = (clamped.r * maxIdx + 0.5) / (n * n);
+                float v = (clamped.g * maxIdx + 0.5) / n;
+
+                vec3 s0 = texture2D(uLutTexture, vec2(b0 * sliceW + uOff, v)).rgb;
+                vec3 s1 = texture2D(uLutTexture, vec2(b1 * sliceW + uOff, v)).rgb;
+                return mix(s0, s1, db);
             }
 
             float hashNoise(vec2 p) {
@@ -83,15 +108,30 @@ internal object FilterShader {
                 }
 
                 vec3 base = src.rgb;
+                float skin = skinMaskYCbCr(base) * uSkinProtect;
                 vec3 c = base;
-                float skin = skinMask(base) * uSkinProtect;
 
-                // 1. Exposure
-                c *= pow(2.0, uExposure);
+                // 1. Primary 3D LUT color science + independent YCbCr portrait skin chroma protection
+                float paramScale = 1.0;
+                if (uLutStrength > 0.005) {
+                    vec3 lutRgb = sampleLut3D(base);
+                    if (uSaturation > -0.99 && skin > 0.01) {
+                        // Preserve LUT filmic tone/luminance on skin while keeping natural healthy skin chromaticity
+                        float baseL = max(lumaOf(base), 0.005);
+                        float lutL = lumaOf(lutRgb);
+                        float lumaScale = clamp(lutL / baseL, 0.65, 1.38);
+                        vec3 naturalSkin = clamp(base * lumaScale, 0.0, 1.0);
+                        lutRgb = mix(lutRgb, naturalSkin, clamp(skin * 0.68, 0.0, 0.78));
+                    }
+                    c = mix(base, lutRgb, uLutStrength);
+                    // Attenuate base parametric math when 3D LUT is driving primary look so AI/telemetry deltas refine cleanly
+                    paramScale = 0.42;
+                }
 
-                // 2. White balance temperature & tint (softened on skin to prevent cool/green cast)
-                float tempEff = uTemperature * (1.0 - 0.45 * skin);
-                float tintEff = uTint * (1.0 - 0.55 * skin);
+                // 2. Exposure & adaptive tonal recovery (telemetry + AI delta)
+                c *= pow(2.0, uExposure * paramScale);
+                float tempEff = uTemperature * paramScale * (1.0 - 0.55 * skin);
+                float tintEff = uTint * paramScale * (1.0 - 0.65 * skin);
                 c.r += tempEff * 0.18 + tintEff * 0.06;
                 c.g -= tintEff * 0.10;
                 c.b -= tempEff * 0.20 - tintEff * 0.05;
@@ -101,30 +141,30 @@ internal object FilterShader {
                 float l = lumaOf(c);
                 float shadowW = pow(1.0 - l, 2.0);
                 float highlightW = pow(l, 2.0);
-                float toneDelta = uShadows * shadowW * 0.34 + uHighlights * highlightW * 0.34;
+                float toneDelta = uShadows * shadowW * 0.30 * paramScale + uHighlights * highlightW * 0.32 * paramScale;
                 c = clamp(c + vec3(toneDelta), 0.0, 1.0);
 
-                // 4. Contrast & matte black-point fade
-                c = clamp((c - 0.5) * (1.0 + uContrast) + 0.5, 0.0, 1.0);
-                c = mix(vec3(uFade * 0.55), vec3(1.0), c);
+                // 4. Fine contrast & matte black-point fade
+                c = clamp((c - 0.5) * (1.0 + uContrast * paramScale) + 0.5, 0.0, 1.0);
+                c = mix(vec3(uFade * 0.45 * paramScale), vec3(1.0), c);
 
-                // 5. Split toning (protected on skin tones)
+                // 5. Subtle split toning (protected on skin tones)
                 float splitL = lumaOf(c);
-                float splitScale = 1.0 - 0.50 * skin;
+                float splitScale = (1.0 - 0.58 * skin) * paramScale;
                 c += uShadowTint * pow(1.0 - splitL, 1.7) * splitScale;
                 c += uHighlightTint * pow(splitL, 1.7) * splitScale;
                 c = clamp(c, 0.0, 1.0);
 
-                // 6. Saturation & skin-protected vibrance (or film monochrome)
-                float gray = dot(c, vec3(0.30, 0.59, 0.11));
+                // 6. Saturation & skin-protected vibrance (or pure silver-halide monochrome)
+                float gray = dot(c, vec3(0.36, 0.54, 0.10));
                 if (uSaturation <= -0.99) {
-                    c = vec3(gray) + uShadowTint * (1.0 - gray) * 0.5 + uHighlightTint * gray * 0.5;
+                    c = mix(vec3(gray), c, 0.18);
                 } else {
                     float mx = max(c.r, max(c.g, c.b));
                     float mn = min(c.r, min(c.g, c.b));
                     float curSat = mx - mn;
-                    float vibBoost = uVibrance * (1.0 - curSat) * (1.0 - 0.55 * skin);
-                    float satFactor = max(0.0, 1.0 + uSaturation + vibBoost);
+                    float vibBoost = uVibrance * paramScale * (1.0 - curSat) * (1.0 - 0.60 * skin);
+                    float satFactor = max(0.0, 1.0 + uSaturation * paramScale + vibBoost);
                     c = mix(vec3(gray), c, satFactor);
                 }
                 c = clamp(c, 0.0, 1.0);
@@ -137,15 +177,15 @@ internal object FilterShader {
                     vec3 n3 = texture2D(uTexture, clamp(vTexCoord + vec2(0.0, stepUv.y), 0.0, 1.0)).rgb;
                     vec3 n4 = texture2D(uTexture, clamp(vTexCoord - vec2(0.0, stepUv.y), 0.0, 1.0)).rgb;
                     vec3 blur = (base + n1 + n2 + n3 + n4) * 0.2;
-                    float bloomMask = smoothstep(0.58, 0.96, lumaOf(blur));
-                    c = clamp(c + blur * bloomMask * uGlow * 0.55, 0.0, 1.0);
+                    float bloomMask = smoothstep(0.60, 0.96, lumaOf(blur));
+                    c = clamp(c + blur * bloomMask * uGlow * 0.52, 0.0, 1.0);
                 }
 
                 // 8. Optical vignette
                 if (uVignette > 0.005) {
                     vec2 centered = vTexCoord - vec2(0.5, 0.5);
                     float dist = dot(centered, centered) * 2.4;
-                    float vig = clamp(1.0 - dist * uVignette, 0.62, 1.0);
+                    float vig = clamp(1.0 - dist * uVignette, 0.64, 1.0);
                     c *= vig;
                 }
 
@@ -169,6 +209,9 @@ internal class GlFilterProgram(private val externalOes: Boolean) {
     private val aTexCoord: Int
     private val uTexMatrix: Int
     private val uTexture: Int
+    private val uLutTexture: Int
+    private val uLutSize: Int
+    private val uLutStrength: Int
     private val uIntensity: Int
     private val uExposure: Int
     private val uContrast: Int
@@ -187,6 +230,8 @@ internal class GlFilterProgram(private val externalOes: Boolean) {
     private val uVignette: Int
     private val uTexelStep: Int
     private val uSeed: Int
+
+    private val lutTextures = HashMap<FilterPreset, Int>()
 
     private val vertexBuffer: FloatBuffer = ByteBuffer.allocateDirect(QUAD_VERTICES.size * 4)
         .order(ByteOrder.nativeOrder())
@@ -219,6 +264,9 @@ internal class GlFilterProgram(private val externalOes: Boolean) {
         aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
         uTexMatrix = GLES20.glGetUniformLocation(program, "uTexMatrix")
         uTexture = GLES20.glGetUniformLocation(program, "uTexture")
+        uLutTexture = GLES20.glGetUniformLocation(program, "uLutTexture")
+        uLutSize = GLES20.glGetUniformLocation(program, "uLutSize")
+        uLutStrength = GLES20.glGetUniformLocation(program, "uLutStrength")
         uIntensity = GLES20.glGetUniformLocation(program, "uIntensity")
         uExposure = GLES20.glGetUniformLocation(program, "uExposure")
         uContrast = GLES20.glGetUniformLocation(program, "uContrast")
@@ -239,6 +287,34 @@ internal class GlFilterProgram(private val externalOes: Boolean) {
         uSeed = GLES20.glGetUniformLocation(program, "uSeed")
     }
 
+    private fun obtainLutTexture(preset: FilterPreset): Int {
+        lutTextures[preset]?.let { return it }
+        val lut = ColorLut3D.forPreset(preset)
+        val ids = IntArray(1)
+        GLES20.glGenTextures(1, ids, 0)
+        val id = ids[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D,
+            0,
+            GLES20.GL_RGBA,
+            lut.stripWidth,
+            lut.stripHeight,
+            0,
+            GLES20.GL_RGBA,
+            GLES20.GL_UNSIGNED_BYTE,
+            lut.toRgbaStripBuffer(),
+        )
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        lutTextures[preset] = id
+        return id
+    }
+
     fun draw(
         textureId: Int,
         texMatrix: FloatArray,
@@ -253,6 +329,15 @@ internal class GlFilterProgram(private val externalOes: Boolean) {
         GLES20.glBindTexture(target, textureId)
         GLES20.glUniform1i(uTexture, 0)
         GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0)
+
+        val lutPreset = FilterPreset.fromId(grade.lutPresetId) ?: FilterPreset.ORIGINAL
+        val useLut = lutPreset != FilterPreset.ORIGINAL && grade.lutStrength > 0.005f
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        val lutTexId = obtainLutTexture(if (useLut) lutPreset else FilterPreset.ORIGINAL)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lutTexId)
+        GLES20.glUniform1i(uLutTexture, 1)
+        GLES20.glUniform1f(uLutSize, ColorLut3D.DEFAULT_SIZE.toFloat())
+        GLES20.glUniform1f(uLutStrength, if (useLut) grade.lutStrength else 0f)
 
         GLES20.glUniform1f(uIntensity, grade.intensity)
         GLES20.glUniform1f(uExposure, grade.exposure)
@@ -282,10 +367,18 @@ internal class GlFilterProgram(private val externalOes: Boolean) {
 
         GLES20.glDisableVertexAttribArray(aPosition)
         GLES20.glDisableVertexAttribArray(aTexCoord)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(target, 0)
     }
 
     fun release() {
+        if (lutTextures.isNotEmpty()) {
+            val ids = lutTextures.values.toIntArray()
+            GLES20.glDeleteTextures(ids.size, ids, 0)
+            lutTextures.clear()
+        }
         GLES20.glDeleteProgram(program)
     }
 

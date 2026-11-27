@@ -80,10 +80,13 @@ internal class CompositionAnalyzer(
 
     @Volatile var watchPerson = false
     @Volatile var proactiveMonitor = false
+    @Volatile var filterPreviewEnabled = false
+    @Volatile var latestFilterPreview: SubjectPixels? = null
     @Volatile var tracker: SubjectTracker? = null
     @Volatile var stepTracker: ParallaxStepTracker? = null
     @Volatile var expectedZoom = 1f
     private var lastProactiveFaceCheckNs = 0L
+    private var lastFilterPreviewNs = 0L
 
     fun prepareSelection() = segmenter.prepare()
 
@@ -134,16 +137,23 @@ internal class CompositionAnalyzer(
                     val input = if (request != null || watchPerson || runProactiveFace) InputImage.fromMediaImage(media, frame.rotation) else null
                     val detection = input?.let { detector.process(it) }
                     val objectDetection = if (request != null && input != null) objectDetector.process(input) else null
+                    val runFilterPreview = filterPreviewEnabled &&
+                        (captured - lastFilterPreviewNs >= FILTER_PREVIEW_INTERVAL_NS)
                     val pixels = try {
                         when {
                             request != null -> SubjectPixels.read(image, frame, targetHeight = 256)
                             activeTracker != null -> SubjectPixels.read(image, frame, targetHeight = 128)
+                            runFilterPreview -> SubjectPixels.read(image, frame, targetHeight = 96)
                             else -> null
                         }
                     } finally {
                         // ML Kit owns the media image until its tasks complete, including on a pixel-read failure.
                         if (detection != null) runCatching { Tasks.await(detection) }
                         if (objectDetection != null) runCatching { Tasks.await(objectDetection) }
+                    }
+                    if (runFilterPreview && pixels != null) {
+                        lastFilterPreviewNs = captured
+                        latestFilterPreview = pixels
                     }
                     val rawFaces = detection?.takeIf { it.isSuccessful }?.result.orEmpty()
                     val faceEntries = rawFaces.mapNotNull { f ->
@@ -336,5 +346,6 @@ internal class CompositionAnalyzer(
 
     companion object {
         private const val PROACTIVE_FACE_INTERVAL_NS = 350_000_000L
+        private const val FILTER_PREVIEW_INTERVAL_NS = 360_000_000L
     }
 }

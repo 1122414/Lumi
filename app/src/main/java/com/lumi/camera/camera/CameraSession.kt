@@ -44,6 +44,7 @@ import com.lumi.camera.filter.AiFilterSuggestion
 import com.lumi.camera.filter.FilterAdjuster
 import com.lumi.camera.filter.FilterPreset
 import com.lumi.camera.filter.FilterSelectionMode
+import com.lumi.camera.filter.FilterThumbnailRenderer
 import com.lumi.camera.filter.FilterUiState
 import com.lumi.camera.filter.PhotoFilterRenderer
 import com.lumi.camera.filter.PreviewFilterEffect
@@ -256,6 +257,7 @@ internal class CameraSession(
     private var filterPreset = initialFilterPreset
     private var filterIntensity = initialFilterIntensity.coerceIn(0f, 1f)
     private var filterAiAdaptive = initialFilterAiAdaptive
+    private var filterPreviewRequested = false
     private var aiFilterSuggestion: AiFilterSuggestion? = null
     private var filterState = FilterUiState(
         mode = filterMode,
@@ -421,6 +423,15 @@ internal class CameraSession(
         refreshFilterState()
     }
 
+    fun setFilterPreviewEnabled(enabled: Boolean) {
+        filterPreviewRequested = enabled
+        observer?.filterPreviewEnabled = enabled
+        if (!enabled) observer?.latestFilterPreview = null
+    }
+
+    fun captureFilterPreviewBitmap(): android.graphics.Bitmap? =
+        observer?.latestFilterPreview?.let(FilterThumbnailRenderer::sampleSquareFromPixels)
+
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun bind() {
         val p = provider ?: return
@@ -510,6 +521,7 @@ internal class CameraSession(
             }
             observer = analyzer
             analyzer.proactiveMonitor = proactivityMode == ProactivityMode.PROACTIVE
+            analyzer.filterPreviewEnabled = filterPreviewRequested
             analysis.setAnalyzer(worker, analyzer)
             binding = next.copy(extensionMode = actualExtensionMode)
             capture = photo

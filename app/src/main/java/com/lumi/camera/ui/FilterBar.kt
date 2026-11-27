@@ -1,6 +1,8 @@
 package com.lumi.camera.ui
 
+import android.graphics.Bitmap
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,12 +11,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -26,6 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -40,6 +44,7 @@ import kotlin.math.roundToInt
 @Composable
 internal fun FilterBar(
     state: FilterUiState,
+    liveThumbnails: Map<FilterPreset, Bitmap> = emptyMap(),
     onSelectAiSmart: () -> Unit,
     onSelectPreset: (FilterPreset) -> Unit,
     onIntensityChange: (Float) -> Unit,
@@ -105,18 +110,20 @@ internal fun FilterBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            AiSmartFilterChip(
+            AiSmartFilterCard(
                 selected = state.mode == FilterSelectionMode.AI_SMART,
                 activePreset = state.resolvedPreset,
+                previewBitmap = liveThumbnails[state.resolvedPreset] ?: liveThumbnails[FilterPreset.ORIGINAL],
                 onClick = onSelectAiSmart,
             )
             FilterPreset.selectablePresets.forEach { preset ->
-                FilterSwatchItem(
+                FilterPreviewCard(
                     preset = preset,
                     selected = state.mode == FilterSelectionMode.MANUAL && state.selectedPreset == preset,
+                    previewBitmap = liveThumbnails[preset],
                     onClick = { onSelectPreset(preset) },
                 )
             }
@@ -141,87 +148,121 @@ internal fun FilterBar(
 }
 
 @Composable
-private fun AiSmartFilterChip(
+private fun AiSmartFilterCard(
     selected: Boolean,
     activePreset: FilterPreset,
+    previewBitmap: Bitmap?,
     onClick: () -> Unit,
 ) {
-    val ringColor = if (selected) LumiColors.Ivory else LumiColors.Hairline
-    val brush = Brush.linearGradient(
+    val shape = RoundedCornerShape(10.dp)
+    val borderColor = if (selected) LumiColors.Ivory else LumiColors.Hairline
+    val fallbackBrush = Brush.linearGradient(
         listOf(Color(0xFF34D399), Color(0xFFF2E6C9), Color(0xFF7DD3FC)),
     )
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = Modifier.clickable(role = Role.RadioButton, onClick = onClick),
+    Box(
+        modifier = Modifier
+            .size(width = 54.dp, height = 64.dp)
+            .clip(shape)
+            .border(if (selected) 1.8.dp else 1.dp, borderColor, shape)
+            .clickable(role = Role.RadioButton, onClick = onClick),
     ) {
+        if (previewBitmap != null) {
+            Image(
+                bitmap = previewBitmap.asImageBitmap(),
+                contentDescription = "AI 智能滤镜实时预览",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(Modifier.fillMaxSize().background(fallbackBrush))
+        }
         Box(
             modifier = Modifier
-                .size(36.dp)
-                .clip(CircleShape)
-                .border(if (selected) 1.8.dp else 1.dp, ringColor, CircleShape)
-                .padding(3.dp)
-                .clip(CircleShape)
-                .background(brush),
-            contentAlignment = Alignment.Center,
+                .align(Alignment.TopStart)
+                .padding(4.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(if (selected) LumiColors.Ivory else Color(0xBF09090B))
+                .padding(horizontal = 4.dp, vertical = 1.dp),
         ) {
             Text(
                 text = "AI",
-                color = LumiColors.IvoryInk,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
+                color = if (selected) LumiColors.IvoryInk else LumiColors.Ivory,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
             )
         }
-        Text(
-            text = if (selected && activePreset != FilterPreset.ORIGINAL) activePreset.shortLabel else "AI智能",
-            color = if (selected) LumiColors.Ivory else LumiColors.TextMuted,
-            fontSize = 10.sp,
-            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-            maxLines = 1,
-        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color(0xD909090B)),
+                    ),
+                )
+                .padding(vertical = 3.dp, horizontal = 2.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (selected && activePreset != FilterPreset.ORIGINAL) activePreset.shortLabel else "智能",
+                color = if (selected) LumiColors.Ivory else LumiColors.TextPrimary,
+                fontSize = 10.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+            )
+        }
     }
 }
 
 @Composable
-private fun FilterSwatchItem(
+private fun FilterPreviewCard(
     preset: FilterPreset,
     selected: Boolean,
+    previewBitmap: Bitmap?,
     onClick: () -> Unit,
 ) {
-    val ringColor = if (selected) LumiColors.Ivory else LumiColors.Hairline
-    val brush = Brush.linearGradient(
+    val shape = RoundedCornerShape(10.dp)
+    val borderColor = if (selected) LumiColors.Ivory else LumiColors.Hairline
+    val fallbackBrush = Brush.linearGradient(
         listOf(Color(preset.swatchPrimaryArgb), Color(preset.swatchSecondaryArgb)),
     )
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = Modifier.clickable(role = Role.RadioButton, onClick = onClick),
+    Box(
+        modifier = Modifier
+            .size(width = 54.dp, height = 64.dp)
+            .clip(shape)
+            .border(if (selected) 1.8.dp else 1.dp, borderColor, shape)
+            .clickable(role = Role.RadioButton, onClick = onClick),
     ) {
+        if (previewBitmap != null) {
+            Image(
+                bitmap = previewBitmap.asImageBitmap(),
+                contentDescription = "${preset.displayName} 实时预览",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(Modifier.fillMaxSize().background(fallbackBrush))
+        }
         Box(
             modifier = Modifier
-                .size(36.dp)
-                .clip(CircleShape)
-                .border(if (selected) 1.8.dp else 1.dp, ringColor, CircleShape)
-                .padding(3.dp)
-                .clip(CircleShape)
-                .background(brush),
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color(0xD909090B)),
+                    ),
+                )
+                .padding(vertical = 3.dp, horizontal = 2.dp),
             contentAlignment = Alignment.Center,
         ) {
-            if (preset == FilterPreset.ORIGINAL) {
-                Box(
-                    Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(LumiColors.Obsidian),
-                )
-            }
+            Text(
+                text = preset.shortLabel,
+                color = if (selected) LumiColors.Ivory else LumiColors.TextPrimary,
+                fontSize = 10.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+            )
         }
-        Text(
-            text = preset.shortLabel,
-            color = if (selected) LumiColors.Ivory else LumiColors.TextMuted,
-            fontSize = 10.sp,
-            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-            maxLines = 1,
-        )
     }
 }

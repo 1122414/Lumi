@@ -130,6 +130,7 @@ import com.lumi.camera.camera.ViewfinderZoom
 import com.lumi.camera.filter.FilterAdjuster
 import com.lumi.camera.filter.FilterPreset
 import com.lumi.camera.filter.FilterSelectionMode
+import com.lumi.camera.filter.FilterThumbnailRenderer
 import com.lumi.camera.filter.FilterUiState
 import com.lumi.camera.gallery.GalleryPhotoItem
 import com.lumi.camera.gallery.LumiGalleryStore
@@ -372,6 +373,7 @@ private fun ColumnScope.CameraScreen(
     var galleryPhotos by remember { mutableStateOf<List<GalleryPhotoItem>>(emptyList()) }
     var galleryViewerOpen by remember { mutableStateOf(false) }
     var captureQueue by remember { mutableStateOf(CaptureQueueState()) }
+    var filterLiveThumbnails by remember { mutableStateOf<Map<FilterPreset, android.graphics.Bitmap>>(emptyMap()) }
     var autoShoot by remember { mutableStateOf(false) }
     var autoShootProgress by remember { mutableFloatStateOf(0f) }
     var autoShotFired by remember { mutableStateOf(false) }
@@ -499,6 +501,22 @@ private fun ColumnScope.CameraScreen(
             fireImmediateShutter()
         } else if (countdownRemaining > 1) {
             countdownRemaining -= 1
+        }
+    }
+
+    LaunchedEffect(activeTray, bound) {
+        val enabled = activeTray == BottomTray.FILTER && bound
+        session.setFilterPreviewEnabled(enabled)
+        if (!enabled) return@LaunchedEffect
+        while (true) {
+            val thumbs = withContext(Dispatchers.Default) {
+                val square = session.captureFilterPreviewBitmap() ?: return@withContext null
+                FilterThumbnailRenderer.renderAllPresets(square)
+            }
+            if (thumbs != null) {
+                filterLiveThumbnails = thumbs
+            }
+            delay(380L)
         }
     }
 
@@ -1204,6 +1222,7 @@ private fun ColumnScope.CameraScreen(
             BottomTray.FILTER -> {
                 FilterBar(
                     state = filterState,
+                    liveThumbnails = filterLiveThumbnails,
                     onSelectAiSmart = {
                         uiPrefs.edit().putString("filter_mode", FilterSelectionMode.AI_SMART.wire).apply()
                         session.selectAiSmartFilter()

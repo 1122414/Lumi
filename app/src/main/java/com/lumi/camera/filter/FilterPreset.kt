@@ -35,6 +35,8 @@ internal data class FilterGrade(
     val grain: Float = 0f,
     val vignette: Float = 0f,
     val intensity: Float = 0f,
+    val lutPresetId: String? = null,
+    val lutStrength: Float = 0f,
 ) {
     val isIdentity: Boolean
         get() = intensity <= 0.005f
@@ -56,6 +58,7 @@ internal data class FilterGrade(
         grain = grain.coerceIn(0f, 0.25f),
         vignette = vignette.coerceIn(0f, 0.35f),
         intensity = intensity.coerceIn(0f, 1f),
+        lutStrength = lutStrength.coerceIn(0f, 1f),
     )
 
     fun lerp(target: FilterGrade, t: Float): FilterGrade {
@@ -78,6 +81,8 @@ internal data class FilterGrade(
             grain = mix(grain, target.grain),
             vignette = mix(vignette, target.vignette),
             intensity = mix(intensity, target.intensity),
+            lutPresetId = if (f >= 0.5f) target.lutPresetId else lutPresetId,
+            lutStrength = mix(lutStrength, target.lutStrength),
         )
     }
 
