@@ -44,6 +44,7 @@ import com.lumi.camera.filter.AiFilterSuggestion
 import com.lumi.camera.filter.FilterAdjuster
 import com.lumi.camera.filter.FilterPreset
 import com.lumi.camera.filter.FilterSelectionMode
+import com.lumi.camera.filter.FilterSessionController
 import com.lumi.camera.filter.FilterThumbnailRenderer
 import com.lumi.camera.filter.FilterUiState
 import com.lumi.camera.filter.PhotoFilterRenderer
@@ -264,40 +265,42 @@ internal class CameraSession(
     private var subjectLostNotified = false
     private var poses: CameraPose? = null
     private var lightSensor: AmbientLightSensor? = null
-    private var capabilities = CameraCapabilities()
-    private var nativeProcessingMode = initialNativeProcessing
-    private var nativeCapability = NativeProcessingCapability()
     private var extensionsManager: ExtensionsManager? = null
-    private var filterMode = initialFilterMode
-    private var filterPreset = initialFilterPreset
-    private var filterIntensity = initialFilterIntensity.coerceIn(0f, 1f)
-    private var filterAiAdaptive = initialFilterAiAdaptive
-    private var filterPreviewRequested = false
-    private var aiFilterSuggestion: AiFilterSuggestion? = null
-    private var filterState = FilterUiState(
-        mode = filterMode,
-        selectedPreset = filterPreset,
-        intensity = filterIntensity,
-        aiAdaptiveEnabled = filterAiAdaptive,
+    private val exposureController = ExposureHardwareController(
+        initialExposureMode = initialExposureMode,
+        initialNativeProcessing = initialNativeProcessing,
+        onExposureState = onExposure,
+        onNativeProcessingState = onNativeProcessing,
+        onMessage = onMessage,
+    )
+    private val filterController = FilterSessionController(
+        initialMode = initialFilterMode,
+        initialPreset = initialFilterPreset,
+        initialIntensity = initialFilterIntensity,
+        initialAiAdaptive = initialFilterAiAdaptive,
+        onStateChanged = onFilter,
+    )
+    private val referenceController = ReferenceSessionController(
+        context = context,
+        mainExecutor = main,
+        workerExecutor = worker,
+        networkExecutor = network,
+        currentConfig = { requests.config },
+        isDisposed = { disposed },
+        onStateChanged = onReference,
+        onMessage = onMessage,
+        onRecipeExposure = { exp ->
+            exposureController.onReferenceExposureReceived(exp, proactivityMode)
+            publishExposureState()
+        },
     )
     private var previewFilterEffect: PreviewFilterEffect? = null
-    private var exposureMode = initialExposureMode
-    private var manualExposure = ManualExposureSettings()
-    private var quickEvSteps = 0f
     private var flashOption = initialFlash
     private var hasFlashUnit = false
     private var torchEnabled = false
     private var aspectRatio = initialAspectRatio
     private var deviceSurfaceRotation = Surface.ROTATION_0
-    private var pendingAiExposure: AiExposureSuggestion? = null
-    private var appliedAiExposure: AiExposureSuggestion? = null
-    private var latestAiExposure: AiExposureSuggestion? = null
     private var lastTelemetryPushNs = 0L
-    private var referenceState = ReferenceUiState()
-    private var referenceAnalysisJpeg: ByteArray? = null
-    private var referenceCompareJpeg: ByteArray? = null
-    private var referenceGeneration = 0
-    private var referenceCall: VisionChat? = null
     private var observer: CompositionAnalyzer? = null
     private var provider: ProcessCameraProvider? = null
     private var binding: Binding? = null
@@ -374,72 +377,27 @@ internal class CameraSession(
         }
     }
 
-    private fun publishNativeProcessingState() {
-        onNativeProcessing(
-            NativeProcessingPolicy.uiState(nativeProcessingMode, exposureMode, nativeCapability)
-        )
-    }
+    private fun publishNativeProcessingState() = exposureController.publishNativeProcessing()
 
     fun setNativeProcessingMode(mode: NativeProcessingMode) {
-        if (nativeProcessingMode == mode) return
-        val previousPlan = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        nativeProcessingMode = mode
-        val nextPlan = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        publishNativeProcessingState()
-        if (previousPlan.extensionMode != nextPlan.extensionMode ||
-            previousPlan.minimizeCaptureLatency != nextPlan.minimizeCaptureLatency) {
-            bind()
-        } else {
-            applyExposureToHardware()
-        }
-        onMessage(
-            if (mode == NativeProcessingMode.PURE) "已切换至纯净原片（关闭本机 AI 优化）"
-            else "已开启本机 AI 成像优化"
-        )
+        val needsRebind = exposureController.setNativeProcessingMode(mode)
+        if (needsRebind) bind() else applyExposureToHardware()
     }
 
     private fun refreshFilterState() {
-        val next = FilterAdjuster.resolve(
-            mode = filterMode,
-            selectedPreset = filterPreset,
-            intensity = filterIntensity,
-            aiAdaptiveEnabled = filterAiAdaptive,
-            aiSuggestion = aiFilterSuggestion,
-            telemetry = currentTelemetry(),
-        )
-        filterState = next
-        previewFilterEffect?.updateGrade(next.resolvedGrade)
-        onFilter(next)
+        filterController.refresh(currentTelemetry(), previewFilterEffect)
     }
 
-    fun selectAiSmartFilter() {
-        filterMode = FilterSelectionMode.AI_SMART
-        if (filterIntensity <= 0.05f) filterIntensity = FilterAdjuster.DEFAULT_INTENSITY
-        refreshFilterState()
-    }
+    fun selectAiSmartFilter() = filterController.selectAiSmart(currentTelemetry(), previewFilterEffect)
 
-    fun selectFilterPreset(preset: FilterPreset) {
-        filterMode = FilterSelectionMode.MANUAL
-        filterPreset = preset
-        if (preset != FilterPreset.ORIGINAL && filterIntensity <= 0.05f) {
-            filterIntensity = FilterAdjuster.DEFAULT_INTENSITY
-        }
-        refreshFilterState()
-    }
+    fun selectFilterPreset(preset: FilterPreset) = filterController.selectPreset(preset, currentTelemetry(), previewFilterEffect)
 
-    fun setFilterIntensity(intensity: Float) {
-        filterIntensity = intensity.coerceIn(0f, 1f)
-        refreshFilterState()
-    }
+    fun setFilterIntensity(intensity: Float) = filterController.setIntensity(intensity, currentTelemetry(), previewFilterEffect)
 
-    fun setFilterAiAdaptive(enabled: Boolean) {
-        if (filterAiAdaptive == enabled) return
-        filterAiAdaptive = enabled
-        refreshFilterState()
-    }
+    fun setFilterAiAdaptive(enabled: Boolean) = filterController.setAiAdaptive(enabled, currentTelemetry(), previewFilterEffect)
 
     fun setFilterPreviewEnabled(enabled: Boolean) {
-        filterPreviewRequested = enabled
+        filterController.setPreviewRequested(enabled)
         observer?.filterPreviewEnabled = enabled
         if (!enabled) observer?.latestFilterPreview = null
     }
@@ -456,8 +414,12 @@ internal class CameraSession(
         val front = lensFacing == CameraSelector.LENS_FACING_FRONT
         val baseSelector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
         val supportedExts = probeSupportedExtensions(baseSelector)
-        val tentativeCap = nativeCapability.copy(supportedExtensions = supportedExts)
-        val initialPlan = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, tentativeCap)
+        val tentativeCap = exposureController.nativeCapability.copy(supportedExtensions = supportedExts)
+        val initialPlan = NativeProcessingPolicy.resolve(
+            exposureController.nativeProcessingMode,
+            exposureController.exposureMode,
+            tentativeCap,
+        )
         val next = Binding(
             size = Extent(view.width, view.height),
             rotation = rotation,
@@ -490,7 +452,7 @@ internal class CameraSession(
             .build()
         preview.setSurfaceProvider(view.surfaceProvider)
         val filterEffect = PreviewFilterEffect().also {
-            it.updateGrade(filterState.resolvedGrade)
+            it.updateGrade(filterController.activeGrade)
         }
         previewFilterEffect = filterEffect
         val group = UseCaseGroup.Builder().setViewPort(viewport)
@@ -522,8 +484,8 @@ internal class CameraSession(
             lightSensor = luxSensor
             luxSensor.start()
             val optics = CameraOptics(camera.cameraInfo, readings)
-            capabilities = optics.capabilities()
-            nativeCapability = NativeProcessingCapability(
+            exposureController.capabilities = optics.capabilities()
+            exposureController.nativeCapability = NativeProcessingCapability(
                 supportedExtensions = if (extensionBindFailed) emptySet() else supportedExts,
                 isp = optics.processingModes(),
             )
@@ -536,7 +498,7 @@ internal class CameraSession(
             }
             observer = analyzer
             analyzer.proactiveMonitor = proactivityMode == ProactivityMode.PROACTIVE
-            analyzer.filterPreviewEnabled = filterPreviewRequested
+            analyzer.filterPreviewEnabled = filterController.previewRequested
             analysis.setAnalyzer(worker, analyzer)
             binding = next.copy(extensionMode = actualExtensionMode)
             capture = photo
@@ -1001,7 +963,7 @@ internal class CameraSession(
             trackerLostSinceNs = null
             subjectLostNotified = false
             lastReadyState = false
-            pendingAiExposure = null
+            exposureController.clearPendingAiExposure()
             observer?.apply { watchPerson = false; tracker = null; stepTracker = null }
             onRecommendationStatus(null)
             publishExposureState()
@@ -1009,61 +971,14 @@ internal class CameraSession(
         }
     }
 
-    private fun currentTelemetry(frame: SceneFrame? = latest): LiveTelemetry {
-        val base = readings.latestExposure()
-        val evStep = capabilities.evStep.takeIf { it > 0f } ?: (1f / 6f)
-        val stats = frame?.lumaStats
-        return LiveTelemetry(
-            iso = base.iso,
-            shutterNs = base.shutterNs,
-            aperture = base.aperture ?: capabilities.primaryAperture,
-            evSteps = base.evIndex * evStep,
-            ambientLux = lightSensor?.latestLux,
-            meanLuma = stats?.meanLuma ?: frame?.meanLuma,
-            highlightClipPct = stats?.highlightClipPct,
-            shadowClipPct = stats?.shadowClipPct,
-            subjectVsBgDiff = stats?.subjectVsBgDiff,
-            lightGuidance = stats?.lightGuidance,
-        )
-    }
+    private fun currentTelemetry(frame: SceneFrame? = latest): LiveTelemetry =
+        exposureController.buildTelemetry(readings, lightSensor?.latestLux, frame)
 
-    private fun publishExposureState() {
-        onExposure(
-            ExposureUiState(
-                mode = exposureMode,
-                capabilities = capabilities,
-                telemetry = currentTelemetry(),
-                manual = manualExposure,
-                pendingAiSuggestion = pendingAiExposure,
-                appliedAiSuggestion = appliedAiExposure,
-                latestAiSuggestion = latestAiExposure,
-            )
-        )
-    }
+    private fun publishExposureState() = exposureController.publishExposure(currentTelemetry())
 
     fun setExposureMode(mode: ExposureControlMode) {
-        if (exposureMode == mode) return
-        val prevProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        exposureMode = mode
-        when (mode) {
-            ExposureControlMode.AUTO -> {
-                pendingAiExposure = null
-                appliedAiExposure = null
-            }
-            ExposureControlMode.AI_AUTO -> {
-                // Keep any latest AI suggestion ready if user wants to apply it.
-            }
-            ExposureControlMode.MANUAL -> {
-                pendingAiExposure = null
-                appliedAiExposure = null
-            }
-        }
-        val nextProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        publishNativeProcessingState()
-        if (prevProc.extensionMode != nextProc.extensionMode) {
-            if (nextProc.bypassedForManual) {
-                onMessage("M 手动挡已临时避让本机厂商扩展，确保手动参数生效")
-            }
+        val needsRebind = exposureController.setExposureMode(mode)
+        if (needsRebind) {
             bind()
         } else {
             applyExposureToHardware()
@@ -1073,16 +988,8 @@ internal class CameraSession(
     }
 
     fun updateManualExposure(settings: ManualExposureSettings) {
-        manualExposure = settings
-        val prevProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        if (exposureMode != ExposureControlMode.MANUAL) {
-            exposureMode = ExposureControlMode.MANUAL
-        }
-        appliedAiExposure = null
-        pendingAiExposure = null
-        val nextProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        publishNativeProcessingState()
-        if (prevProc.extensionMode != nextProc.extensionMode) {
+        val needsRebind = exposureController.updateManualExposure(settings)
+        if (needsRebind) {
             bind()
         } else {
             applyExposureToHardware()
@@ -1091,228 +998,45 @@ internal class CameraSession(
     }
 
     fun resetManualExposure() {
-        manualExposure = ManualExposureSettings()
-        appliedAiExposure = null
-        pendingAiExposure = null
+        exposureController.resetManualExposure()
         applyExposureToHardware()
         publishExposureState()
     }
 
     fun applyPendingAiExposure() {
-        val suggestion = pendingAiExposure ?: return
-        pendingAiExposure = null
-        appliedAiExposure = suggestion
+        exposureController.applyPendingAiExposure() ?: return
         applyExposureToHardware()
         publishExposureState()
-        onMessage("已应用 AI 光影参数：${suggestion.summaryLabel()}")
     }
 
     fun revertAiExposure() {
-        appliedAiExposure = null
-        pendingAiExposure = null
+        exposureController.revertAiExposure()
         applyExposureToHardware()
         publishExposureState()
-        onMessage("已还原为自动测光")
     }
 
     fun applyLatestAiToManual() {
-        val suggestion = latestAiExposure ?: return
-        val prevProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        manualExposure = ExposureSolver.fromAiSuggestion(suggestion, capabilities)
-        exposureMode = ExposureControlMode.MANUAL
-        pendingAiExposure = null
-        appliedAiExposure = null
-        val nextProc = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        publishNativeProcessingState()
-        if (prevProc.extensionMode != nextProc.extensionMode) {
+        val (applied, needsRebind) = exposureController.applyLatestAiToManual()
+        if (!applied) return
+        if (needsRebind) {
             bind()
         } else {
             applyExposureToHardware()
             publishExposureState()
         }
-        onMessage("已将 AI 建议填入 M 手动挡，可继续微调")
     }
 
-    fun loadReferenceImage(uri: Uri) {
-        val gen = ++referenceGeneration
-        referenceCall?.cancel(network)
-        referenceCall = null
-        referenceAnalysisJpeg = null
-        referenceCompareJpeg = null
-        referenceState = ReferenceUiState(analyzing = true)
-        onReference(referenceState)
-        worker.execute {
-            val loaded = runCatching { ReferenceImageLoader.load(context, uri) }.getOrNull()
-            main.execute {
-                if (disposed || gen != referenceGeneration) return@execute
-                if (loaded == null) {
-                    referenceState = ReferenceUiState(errorMessage = "无法读取参考图，请换一张图片重试。")
-                    onReference(referenceState)
-                    onMessage("无法读取参考图，请换一张图片。")
-                    return@execute
-                }
-                referenceAnalysisJpeg = loaded.analysisJpeg
-                referenceCompareJpeg = loaded.compactCompareJpeg
-                val configured = requests.config.validationError(BuildConfig.DEBUG) == null
-                referenceState = ReferenceUiState(
-                    previewBitmap = loaded.displayBitmap,
-                    overlayEnabled = false,
-                    overlayAlpha = 0.25f,
-                    analyzing = configured,
-                    recipe = null,
-                    errorMessage = null,
-                )
-                onReference(referenceState)
-                if (configured) {
-                    onMessage("参考图已载入，正在拆解拍摄处方（轻点缩略图可开叠图）")
-                    analyzeReferenceRecipe(gen, loaded.analysisJpeg)
-                } else {
-                    onMessage("参考图已载入，轻点右上角缩略图可开启 25% 叠图")
-                }
-            }
-        }
-    }
+    fun loadReferenceImage(uri: Uri) = referenceController.loadImage(uri)
 
-    fun retryReferenceAnalysis() {
-        val jpeg = referenceAnalysisJpeg ?: return
-        if (requests.config.validationError(BuildConfig.DEBUG) != null) {
-            onMessage("请先配置视觉模型后再拆解处方。")
-            return
-        }
-        val gen = ++referenceGeneration
-        referenceCall?.cancel(network)
-        referenceCall = null
-        referenceState = referenceState.copy(analyzing = true, errorMessage = null)
-        onReference(referenceState)
-        analyzeReferenceRecipe(gen, jpeg)
-    }
+    fun retryReferenceAnalysis() = referenceController.retryAnalysis()
 
-    private fun analyzeReferenceRecipe(gen: Int, analysisJpeg: ByteArray) {
-        val cfg = requests.config
-        val deadline = SystemClock.elapsedRealtimeNanos() + 20_000_000_000L
-        val task = VisionChat(cfg, deadline)
-        referenceCall = task
-        network.execute {
-            val result = runCatching { task.analyzeReference(analysisJpeg) }
-            main.execute {
-                if (disposed || gen != referenceGeneration) return@execute
-                if (referenceCall === task) referenceCall = null
-                result.onSuccess { recipe ->
-                    referenceState = referenceState.copy(analyzing = false, recipe = recipe, errorMessage = null)
-                    onReference(referenceState)
-                    recipe.targetExposure?.let { exp ->
-                        latestAiExposure = exp
-                        if (exposureMode == ExposureControlMode.AI_AUTO && proactivityMode == ProactivityMode.MANUAL) {
-                            pendingAiExposure = exp
-                        }
-                        publishExposureState()
-                    }
-                    onMessage("参考处方已就绪：${recipe.shotType} · 点推荐构图获取复刻与超越建议")
-                }.onFailure { err ->
-                    val notice = (err as? ModelFailure)?.notice ?: "参考图拆解失败，仍可使用半透明叠图和实时推荐。"
-                    referenceState = referenceState.copy(analyzing = false, errorMessage = notice)
-                    onReference(referenceState)
-                }
-            }
-        }
-    }
+    fun toggleReferenceOverlay() = referenceController.toggleOverlay()
 
-    fun toggleReferenceOverlay() {
-        if (!referenceState.hasReference) return
-        val next = !referenceState.overlayEnabled
-        referenceState = referenceState.copy(overlayEnabled = next)
-        onReference(referenceState)
-        onMessage(if (next) "已开启参考图半透明叠图" else "已关闭参考图叠图")
-    }
+    fun setReferenceOverlayAlpha(alpha: Float) = referenceController.setOverlayAlpha(alpha)
 
-    fun setReferenceOverlayAlpha(alpha: Float) {
-        if (!referenceState.hasReference) return
-        referenceState = referenceState.copy(overlayAlpha = alpha.coerceIn(0.15f, 0.45f))
-        onReference(referenceState)
-    }
+    fun clearReferenceImage() = referenceController.clear()
 
-    fun clearReferenceImage() {
-        referenceGeneration++
-        referenceCall?.cancel(network)
-        referenceCall = null
-        referenceAnalysisJpeg = null
-        referenceCompareJpeg = null
-        referenceState = ReferenceUiState()
-        onReference(referenceState)
-        onMessage("已清除参考图")
-    }
-
-    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
-    private fun applyExposureToHardware() {
-        val cam = camera ?: return
-        val effectiveSettings = when (exposureMode) {
-            ExposureControlMode.AUTO -> ManualExposureSettings(evSteps = quickEvSteps)
-            ExposureControlMode.MANUAL -> manualExposure
-            ExposureControlMode.AI_AUTO -> appliedAiExposure?.let { ExposureSolver.fromAiSuggestion(it, capabilities) }
-                ?: ManualExposureSettings(evSteps = quickEvSteps)
-        }
-        val baseline = readings.lastAutoExposure().takeIf { it.iso != null && it.shutterNs != null }
-            ?: readings.latestExposure()
-        val resolved = ExposureSolver.resolve(effectiveSettings, capabilities, baseline)
-
-        val options = CaptureRequestOptions.Builder()
-        if (resolved.aeAuto) {
-            // Clear AE_MODE override so CameraX ImageCapture owns ON / ON_AUTO_FLASH / ON_ALWAYS_FLASH.
-            options.clearCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE)
-            options.clearCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY)
-            options.clearCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME)
-            runCatching { cam.cameraControl.setExposureCompensationIndex(resolved.evIndex) }
-        } else {
-            options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-            resolved.manualIso?.let { options.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, it) }
-            resolved.manualShutterNs?.let { options.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
-        }
-
-        if (resolved.wbKelvin != null) {
-            options.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
-            options.setCaptureRequestOption(
-                CaptureRequest.COLOR_CORRECTION_MODE,
-                CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX,
-            )
-            options.setCaptureRequestOption(
-                CaptureRequest.COLOR_CORRECTION_GAINS,
-                ExposureSolver.kelvinToRggbVector(resolved.wbKelvin),
-            )
-        } else {
-            options.clearCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE)
-            options.clearCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_MODE)
-            options.clearCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_GAINS)
-        }
-
-        if (resolved.aperture != null) {
-            options.setCaptureRequestOption(CaptureRequest.LENS_APERTURE, resolved.aperture)
-        } else {
-            options.clearCaptureRequestOption(CaptureRequest.LENS_APERTURE)
-        }
-
-        val processing = NativeProcessingPolicy.resolve(nativeProcessingMode, exposureMode, nativeCapability)
-        if (processing.sceneMode != null) {
-            options.setCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE, processing.sceneMode)
-        } else {
-            options.clearCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE)
-        }
-        if (processing.edgeMode != null) {
-            options.setCaptureRequestOption(CaptureRequest.EDGE_MODE, processing.edgeMode)
-        } else {
-            options.clearCaptureRequestOption(CaptureRequest.EDGE_MODE)
-        }
-        if (processing.noiseReductionMode != null) {
-            options.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, processing.noiseReductionMode)
-        } else {
-            options.clearCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE)
-        }
-
-        runCatching {
-            Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(options.build())
-        }.onFailure { e ->
-            Log.w("LumiCamera", "Unable to apply Camera2 exposure options", e)
-        }
-    }
+    private fun applyExposureToHardware() = exposureController.applyToHardware(camera, readings)
 
     private fun applyFlashToHardware() {
         val cam = camera ?: return
@@ -1331,15 +1055,16 @@ internal class CameraSession(
     }
 
     private fun publishControlsState() {
+        val caps = exposureController.capabilities
         onControls(
             CameraControlsUiState(
                 flash = if (hasFlashUnit) flashOption else FlashOption.OFF,
                 hasFlash = hasFlashUnit,
                 aspectRatio = aspectRatio,
-                quickEvSteps = quickEvSteps,
-                minEvSteps = capabilities.minEv.coerceAtLeast(-2.5f),
-                maxEvSteps = capabilities.maxEv.coerceAtMost(2.5f),
-                canQuickEv = exposureMode != ExposureControlMode.MANUAL,
+                quickEvSteps = exposureController.quickEvSteps,
+                minEvSteps = caps.minEv.coerceAtLeast(-2.5f),
+                maxEvSteps = caps.maxEv.coerceAtMost(2.5f),
+                canQuickEv = exposureController.exposureMode != ExposureControlMode.MANUAL,
             ),
         )
     }
@@ -1352,7 +1077,7 @@ internal class CameraSession(
         flashOption = flashOption.next()
         applyFlashToHardware()
         publishControlsState()
-        if (exposureMode == ExposureControlMode.MANUAL &&
+        if (exposureController.exposureMode == ExposureControlMode.MANUAL &&
             (flashOption == FlashOption.AUTO || flashOption == FlashOption.ON)) {
             onMessage("M 手动挡下请用「常亮补光」或切回自动曝光以触发闪光")
         }
@@ -1376,8 +1101,8 @@ internal class CameraSession(
         val cam = camera ?: return false
         if (zoom.changing || view.width <= 0 || view.height <= 0) return false
         focusOnPreviewPoint(x, y)
-        if (exposureMode != ExposureControlMode.MANUAL && quickEvSteps != 0f) {
-            quickEvSteps = 0f
+        if (exposureController.exposureMode != ExposureControlMode.MANUAL && exposureController.quickEvSteps != 0f) {
+            exposureController.resetQuickEv()
             runCatching { cam.cameraControl.setExposureCompensationIndex(0) }
             publishControlsState()
         }
@@ -1386,13 +1111,10 @@ internal class CameraSession(
 
     fun setQuickEv(evSteps: Float) {
         val cam = camera ?: return
-        if (exposureMode == ExposureControlMode.MANUAL) return
-        val minEv = capabilities.minEv.coerceAtLeast(-2.5f)
-        val maxEv = capabilities.maxEv.coerceAtMost(2.5f)
-        val clamped = evSteps.coerceIn(minEv, maxEv)
-        quickEvSteps = clamped
-        val step = capabilities.evStep.takeIf { it > 0f } ?: (1f / 6f)
-        val idx = (clamped / step).roundToInt().coerceIn(capabilities.evIndexRange.first, capabilities.evIndexRange.last)
+        if (!exposureController.setQuickEv(evSteps)) return
+        val caps = exposureController.capabilities
+        val step = caps.evStep.takeIf { it > 0f } ?: (1f / 6f)
+        val idx = (exposureController.quickEvSteps / step).roundToInt().coerceIn(caps.evIndexRange.first, caps.evIndexRange.last)
         runCatching { cam.cameraControl.setExposureCompensationIndex(idx) }
         publishControlsState()
     }
@@ -1568,13 +1290,12 @@ internal class CameraSession(
         val userTapped = sample.tapUv != null
         val preferencePrior = aestheticPrefs.read().promptPrior()
         val sessionMemoryHint = sessionMemory.promptSummary(System.currentTimeMillis())
-        val telemetrySummary = currentTelemetry(source).promptSummary(capabilities)
-        val requestExposureAdvice = exposureMode != ExposureControlMode.AUTO
-        val requestFilterAdvice = filterMode == FilterSelectionMode.AI_SMART ||
-            (filterPreset != FilterPreset.ORIGINAL && filterAiAdaptive)
-        val capturedFilterPreset = if (filterMode == FilterSelectionMode.MANUAL) filterPreset else null
-        val capturedRefRecipe = referenceState.recipe
-        val capturedRefJpeg = referenceCompareJpeg
+        val telemetrySummary = currentTelemetry(source).promptSummary(exposureController.capabilities)
+        val requestExposureAdvice = exposureController.exposureMode != ExposureControlMode.AUTO
+        val requestFilterAdvice = filterController.shouldRequestAiFilterAdvice
+        val capturedFilterPreset = filterController.manualPresetForPrompt
+        val capturedRefRecipe = referenceController.currentRecipe
+        val capturedRefJpeg = referenceController.compareJpeg
         onRecommendationStatus(
             when {
                 hasBaseline && capturedRefJpeg != null -> "端侧已就绪 · 云端对照参考图精修中…"
@@ -1713,27 +1434,12 @@ internal class CameraSession(
             observer?.stepTracker = null
             latestStepProgress = null
         }
-        val aiExp = plan.exposureSuggestion
-        if (aiExp != null) {
-            latestAiExposure = aiExp
-            if (exposureMode == ExposureControlMode.AI_AUTO) {
-                if (proactivityMode == ProactivityMode.PROACTIVE) {
-                    appliedAiExposure = aiExp
-                    pendingAiExposure = null
-                    applyExposureToHardware()
-                } else if (proactivityMode == ProactivityMode.MANUAL) {
-                    pendingAiExposure = aiExp
-                }
-            }
-            publishExposureState()
-        } else if (pendingAiExposure != null) {
-            pendingAiExposure = null
-            publishExposureState()
+        if (exposureController.onAiExposureReceived(plan.exposureSuggestion, proactivityMode)) {
+            applyExposureToHardware()
         }
-        val aiFilter = plan.filterSuggestion
-        if (aiFilter != null) {
-            aiFilterSuggestion = aiFilter
-            refreshFilterState()
+        publishExposureState()
+        plan.filterSuggestion?.let { aiFilter ->
+            filterController.applyAiSuggestion(aiFilter, currentTelemetry(), previewFilterEffect)
         }
         // Automatically lock AF/AE focus and metering onto the chosen subject.
         val size = binding?.size
@@ -1895,7 +1601,7 @@ internal class CameraSession(
         val captureClutter = latest?.backgroundClutter
         val captureFaceBox = latest?.faces?.maxByOrNull { (it.right - it.left) * (it.bottom - it.top) }
         val captureUnresolvedStep = run?.target?.stepDirection != null && latestStepProgress?.satisfied != true
-        val activeGrade = filterState.resolvedGrade
+        val activeGrade = filterController.activeGrade
         val activeAspect = aspectRatio
         val frontMirror = lensFacing == CameraSelector.LENS_FACING_FRONT
         photo.targetRotation = deviceSurfaceRotation
@@ -2036,7 +1742,7 @@ internal class CameraSession(
         logZoomFrame = true
         camera = null
         hasFlashUnit = false
-        quickEvSteps = 0f
+        exposureController.clearTransientAiState()
         readings.reset()
         zoom = ViewfinderZoom()
         onZoom(zoom)
@@ -2061,8 +1767,6 @@ internal class CameraSession(
         poses = null
         lightSensor?.close()
         lightSensor = null
-        pendingAiExposure = null
-        appliedAiExposure = null
         handler.removeCallbacks(expire)
         uses.filterIsInstance<ImageAnalysis>().forEach { it.clearAnalyzer() }
         if (uses.isNotEmpty()) provider?.unbind(*uses)
@@ -2079,8 +1783,7 @@ internal class CameraSession(
 
     fun dispose() {
         disposed = true
-        referenceCall?.cancel(network)
-        referenceCall = null
+        referenceController.dispose()
         owner.lifecycle.removeObserver(this)
         view.removeOnLayoutChangeListener(layout)
         displays.unregisterDisplayListener(this)

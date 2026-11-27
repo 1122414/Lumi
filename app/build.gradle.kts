@@ -77,6 +77,24 @@ android {
         }
     }
 
+    // Produce lean per-ABI APKs (~45-55 MB instead of ~133 MB universal APK) for direct/beta distribution,
+    // while keeping Android App Bundle (.aab) splits cleanly enabled when running bundle* tasks.
+    val isBuildingBundle = gradle.startParameter.taskNames.any { it.contains("bundle", ignoreCase = true) }
+    splits {
+        abi {
+            isEnable = !isBuildingBundle
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
+        }
+    }
+
+    bundle {
+        abi { enableSplit = true }
+        density { enableSplit = true }
+        language { enableSplit = true }
+    }
+
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
