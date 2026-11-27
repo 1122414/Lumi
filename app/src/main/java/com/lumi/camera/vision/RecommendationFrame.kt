@@ -21,13 +21,17 @@ internal class RecommendationFrame(
     fun jpeg(): ByteArray {
         val geometry = scene.geometry
         val crop = geometry.crop
-        val scale = MAX_EDGE_PX / maxOf(crop.width, crop.height)
+        val safeLeft = crop.left.coerceIn(0, (pixels.width - 1).coerceAtLeast(0))
+        val safeTop = crop.top.coerceIn(0, (pixels.height - 1).coerceAtLeast(0))
+        val safeWidth = crop.width.coerceIn(1, (pixels.width - safeLeft).coerceAtLeast(1))
+        val safeHeight = crop.height.coerceIn(1, (pixels.height - safeTop).coerceAtLeast(1))
+        val scale = MAX_EDGE_PX / maxOf(safeWidth, safeHeight).coerceAtLeast(1)
         val matrix = Matrix().apply {
             setScale(scale, scale)
             postRotate(geometry.rotation.toFloat())
             if (geometry.mirrored) postScale(-1f, 1f)
         }
-        val upright = Bitmap.createBitmap(pixels, crop.left, crop.top, crop.width, crop.height, matrix, true)
+        val upright = Bitmap.createBitmap(pixels, safeLeft, safeTop, safeWidth, safeHeight, matrix, true)
         val annotated = if (candidates.isNotEmpty() || tapUv != null) {
             upright.copy(Bitmap.Config.ARGB_8888, true).also { bmp ->
                 drawCandidateOverlay(bmp, candidates, tapUv)
@@ -112,7 +116,9 @@ internal class RecommendationFrame(
         }
     }
 
-    override fun close() = pixels.recycle()
+    override fun close() {
+        if (!pixels.isRecycled) pixels.recycle()
+    }
 
     companion object {
         private const val MAX_EDGE_PX = 512f

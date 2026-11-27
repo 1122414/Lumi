@@ -1,6 +1,9 @@
 package com.lumi.camera.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -28,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.lumi.camera.BuildConfig
 import com.lumi.camera.camera.DeviceQuirks
+import com.lumi.camera.observability.LumiCrashGuard
 import com.lumi.camera.observability.LumiTelemetry
 
 internal object PrivacyConsentStore {
@@ -55,6 +60,7 @@ internal fun PrivacyAndHealthDialog(
     onClearLocalData: () -> Unit,
     onAcceptOrClose: () -> Unit,
 ) {
+    val context = LocalContext.current
     val quirks = DeviceQuirks.current()
     val telemetry = LumiTelemetry.snapshot()
 
@@ -134,6 +140,16 @@ internal fun PrivacyAndHealthDialog(
                                 fontSize = 10.sp,
                                 fontFamily = FontFamily.Monospace,
                             )
+                            TextButton(
+                                onClick = {
+                                    val full = LumiCrashGuard.latestCrashDetail(context) ?: latestCrashSummary
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    cm?.setPrimaryClip(ClipData.newPlainText("Lumi Crash Log", full))
+                                    Toast.makeText(context, "已复制脱敏异常日志", Toast.LENGTH_SHORT).show()
+                                },
+                            ) {
+                                Text("复制完整异常日志", color = LumiColors.Ivory, fontSize = 11.sp)
+                            }
                         }
                     }
                 }

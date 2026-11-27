@@ -63,18 +63,22 @@ internal class CompositionAnalyzer(
     private val deliver: (SceneFrame) -> Unit,
 ) : ImageAnalysis.Analyzer, AutoCloseable {
     private val segmenter = SubjectSegmenter(context.applicationContext)
-    private val detector = FaceDetection.getClient(
-        FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .enableTracking()
-            .build()
-    )
-    private val objectDetector = ObjectDetection.getClient(
-        ObjectDetectorOptions.Builder()
-            .setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE)
-            .enableMultipleObjects()
-            .build()
-    )
+    private val detector = runCatching {
+        FaceDetection.getClient(
+            FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .enableTracking()
+                .build()
+        )
+    }.onFailure { Log.w("LumiCamera", "Face detector initialization failed", it) }.getOrNull()
+    private val objectDetector = runCatching {
+        ObjectDetection.getClient(
+            ObjectDetectorOptions.Builder()
+                .setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE)
+                .enableMultipleObjects()
+                .build()
+        )
+    }.onFailure { Log.w("LumiCamera", "Object detector initialization failed", it) }.getOrNull()
     private var reportedFailure = false
     val pendingFrame = PendingRecommendationFrame()
 
@@ -134,9 +138,21 @@ internal class CompositionAnalyzer(
                     val activeTracker = tracker
                     val runProactiveFace = proactiveMonitor && (captured - lastProactiveFaceCheckNs >= PROACTIVE_FACE_INTERVAL_NS)
                     if (runProactiveFace) lastProactiveFaceCheckNs = captured
-                    val input = if (request != null || watchPerson || runProactiveFace) InputImage.fromMediaImage(media, frame.rotation) else null
-                    val detection = input?.let { detector.process(it) }
-                    val objectDetection = if (request != null && input != null) objectDetector.process(input) else null
+                    val input = if (request != null || watchPerson || runProactiveFace) {
+                        runCatching { InputImage.fromMediaImage(media, frame.rotation) }
+                            .onFailure { Log.w("LumiCamera", "InputImage creation failed", it) }
+                            .getOrNull()
+                    } else null
+                    val detection = input?.let {
+                        runCatching { detector?.process(it) }
+                            .onFailure { t -> Log.w("LumiCamera", "Face detection failed", t) }
+                            .getOrNull()
+                    }
+                    val objectDetection = if (request != null && input != null) {
+                        runCatching { objectDetector?.process(input) }
+                            .onFailure { t -> Log.w("LumiCamera", "Object detection failed", t) }
+                            .getOrNull()
+                    } else null
                     val runFilterPreview = filterPreviewEnabled &&
                         (captured - lastFilterPreviewNs >= FILTER_PREVIEW_INTERVAL_NS)
                     val pixels = try {
@@ -210,17 +226,24 @@ internal class CompositionAnalyzer(
                         lumaStats = lumaStats,
                     )
                 }
-            } catch (e: Exception) {
-                if (!reportedFailure) Log.w("LumiCamera", "Composition observation unavailable", e)
+            } catch (t: Throwable) {
+                if (!reportedFailure) Log.w("LumiCamera", "Composition observation unavailable", t)
                 reportedFailure = true
                 empty
             }
             deliver(result)
             if (request != null && result.pixels != null) {
-                val bitmap = try { image.toBitmap() } catch (_: RuntimeException) { return }
+                val bitmap = try {
+                    image.toBitmap()
+                } catch (t: Throwable) {
+                    Log.w("LumiCamera", "Recommendation bitmap conversion failed", t)
+                    return
+                }
                 if (pendingFrame.claim(request, captured, SystemClock.elapsedRealtimeNanos())) {
                     modelFrameReady(request, RecommendationFrame(result, bitmap, candidates, request.tapUv))
-                } else bitmap.recycle()
+                } else if (!bitmap.isRecycled) {
+                    bitmap.recycle()
+                }
             }
         } finally {
             image.close()
@@ -339,9 +362,9 @@ internal class CompositionAnalyzer(
 
     override fun close() {
         pendingFrame.await(null)
-        detector.close()
-        objectDetector.close()
-        segmenter.close()
+        runCatching { detector?.close() }
+        runCatching { objectDetector?.close() }
+        runCatching { segmenter.close() }
     }
 
     companion object {

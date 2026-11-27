@@ -96,6 +96,15 @@ internal object LumiCrashGuard {
         }.getOrNull()
     }
 
+    fun latestCrashDetail(context: Context): String? {
+        val latest = crashDir(context)
+            .listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".log") }
+            ?.maxByOrNull { it.lastModified() }
+            ?: return null
+        return runCatching { latest.readText() }.getOrNull()
+    }
+
     fun clearLogs(context: Context) {
         crashDir(context).listFiles()?.forEach { runCatching { it.delete() } }
     }

@@ -1256,7 +1256,12 @@ internal class CameraSession(
             return
         }
         val capturedZoom = appliedZoom
-        val hasBaseline = applyOfflineBaseline(source, sample, capturedZoom)
+        val hasBaseline = try {
+            applyOfflineBaseline(source, sample, capturedZoom)
+        } catch (t: Throwable) {
+            Log.w("LumiCamera", "Offline baseline failed; continuing safely", t)
+            false
+        }
         LumiTelemetry.recordAiTriggered(hasBaseline)
         val cloudConfigured = token.config.validationError(BuildConfig.DEBUG) == null
         if (!cloudConfigured) {
@@ -1307,50 +1312,75 @@ internal class CameraSession(
                 else -> "正在推荐构图…"
             }
         )
-        observer?.let { analyzer -> worker.execute {
-            try { analyzer.prepareSelection() } catch (e: RuntimeException) {
-                Log.w("LumiCamera", "Subject model warmup unavailable", e)
-            }
-        } }
-        network.execute {
-            var sentNs: Long? = null
-            var sentJpeg: ByteArray? = null
-            val result = try {
-                val jpeg = sample.use { task.remainingMs(); it.jpeg() }
-                if (BuildConfig.DEBUG) sentJpeg = jpeg
-                sentNs = SystemClock.elapsedRealtimeNanos()
-                Result.success(
-                    task.send(
-                        jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom,
-                        preferencePrior, telemetrySummary, requestExposureAdvice,
-                        capturedRefRecipe, capturedRefJpeg,
-                        requestFilterAdvice, capturedFilterPreset,
-                        sessionMemoryHint,
-                    )
-                )
-            } catch (e: Exception) { Result.failure(e) }
-            val times = RequestTimes(token.config, token.startedNs, sentNs ?: now, SystemClock.elapsedRealtimeNanos())
-            main.execute select@{
-                if (requests.active != token) return@select
-                call = null
-                if (sentNs != null) {
-                    onConnection(result.fold(ConnectionResult::fromReply) {
-                        (it as? ModelFailure)?.kind ?: ConnectionResult.UNREACHABLE
-                    })
-                }
-                val analyzer = observer
-                val reply = result.getOrNull()
-                val subject = reply?.subject
-                if (analyzer == null || subject == null) {
-                    finishRecommendation(token, source, result, times, null, sentJpeg, capturedFront, capturedZoom, candidates.size, userTapped)
-                } else worker.execute {
-                    val attempt = try { analyzer.selectDiagnosed(source, subject, allowBoxFallback = reply.candidateId != null) } catch (e: RuntimeException) {
-                        Log.w("LumiCamera", "Subject segmentation unavailable", e)
-                        OutlineAttempt(null, "SEGMENTER_ERROR")
+        observer?.let { analyzer ->
+            runCatching {
+                worker.execute {
+                    try {
+                        analyzer.prepareSelection()
+                    } catch (t: Throwable) {
+                        Log.w("LumiCamera", "Subject model warmup unavailable", t)
                     }
-                    main.execute { finishRecommendation(token, source, result, times, attempt, sentJpeg, capturedFront, capturedZoom, candidates.size, userTapped) }
                 }
             }
+        }
+        val dispatched = runCatching {
+            network.execute {
+                var sentNs: Long? = null
+                var sentJpeg: ByteArray? = null
+                val result = try {
+                    val jpeg = sample.use { task.remainingMs(); it.jpeg() }
+                    if (BuildConfig.DEBUG) sentJpeg = jpeg
+                    sentNs = SystemClock.elapsedRealtimeNanos()
+                    Result.success(
+                        task.send(
+                            jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom,
+                            preferencePrior, telemetrySummary, requestExposureAdvice,
+                            capturedRefRecipe, capturedRefJpeg,
+                            requestFilterAdvice, capturedFilterPreset,
+                            sessionMemoryHint,
+                        )
+                    )
+                } catch (t: Throwable) {
+                    Log.w("LumiCamera", "Cloud composition request failed", t)
+                    Result.failure(if (t is Exception) t else RuntimeException(t))
+                }
+                val times = RequestTimes(token.config, token.startedNs, sentNs ?: now, SystemClock.elapsedRealtimeNanos())
+                main.execute select@{
+                    if (requests.active != token) return@select
+                    call = null
+                    if (sentNs != null) {
+                        onConnection(result.fold(ConnectionResult::fromReply) {
+                            (it as? ModelFailure)?.kind ?: ConnectionResult.UNREACHABLE
+                        })
+                    }
+                    val analyzer = observer
+                    val reply = result.getOrNull()
+                    val subject = reply?.subject
+                    if (analyzer == null || subject == null) {
+                        finishRecommendation(token, source, result, times, null, sentJpeg, capturedFront, capturedZoom, candidates.size, userTapped)
+                    } else {
+                        val queued = runCatching {
+                            worker.execute {
+                                val attempt = try {
+                                    analyzer.selectDiagnosed(source, subject, allowBoxFallback = reply.candidateId != null)
+                                } catch (t: Throwable) {
+                                    Log.w("LumiCamera", "Subject segmentation unavailable", t)
+                                    OutlineAttempt(null, "SEGMENTER_ERROR")
+                                }
+                                main.execute {
+                                    finishRecommendation(token, source, result, times, attempt, sentJpeg, capturedFront, capturedZoom, candidates.size, userTapped)
+                                }
+                            }
+                        }.isSuccess
+                        if (!queued) {
+                            finishRecommendation(token, source, result, times, OutlineAttempt(null, "SEGMENTER_EXECUTOR_CLOSED"), sentJpeg, capturedFront, capturedZoom, candidates.size, userTapped)
+                        }
+                    }
+                }
+            }
+        }.isSuccess
+        if (!dispatched) {
+            sample.close()
         }
     }
 
