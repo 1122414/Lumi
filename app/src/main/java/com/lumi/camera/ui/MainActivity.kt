@@ -314,6 +314,7 @@ private fun ColumnScope.CameraScreen(
     var autoShootProgress by remember { mutableFloatStateOf(0f) }
     var autoShotFired by remember { mutableStateOf(false) }
     var wasReady by remember { mutableStateOf(false) }
+    var lightTipPinned by remember { mutableStateOf(false) }
 
     fun setFailure(failed: Boolean) {
         if (lastFailed != failed) {
@@ -689,6 +690,7 @@ private fun ColumnScope.CameraScreen(
                 autoShotFired,
                 proactivityMode,
                 filterState.reason,
+                lightTipPinned,
             ) {
                 resolveGuidanceBanner(
                     frame = frame,
@@ -699,14 +701,17 @@ private fun ColumnScope.CameraScreen(
                     autoShotFired = autoShotFired,
                     proactivityMode = proactivityMode,
                     filterReason = filterState.reason,
+                    lightTipPinned = lightTipPinned,
                 )
             }
+            val lightGuide = frame.lightGuidance
+            val showLightBadge = lightGuide != null && lightGuide.isActionable && proactivityMode != ProactivityMode.QUIET
             Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(
                         top = 12.dp,
-                        start = 16.dp,
+                        start = if (showLightBadge) 84.dp else 16.dp,
                         end = if (referenceState.hasReference) 74.dp else 16.dp,
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -742,6 +747,29 @@ private fun ColumnScope.CameraScreen(
                     onApplyPending = session::applyPendingAiExposure,
                     onRevertApplied = session::revertAiExposure,
                 )
+            }
+
+            if (showLightBadge && lightGuide != null) {
+                Surface(
+                    onClick = { lightTipPinned = !lightTipPinned },
+                    shape = RoundedCornerShape(14.dp),
+                    color = LumiColors.GlassDark,
+                    border = BorderStroke(
+                        1.dp,
+                        if (lightTipPinned) LumiColors.Ivory else LumiColors.Hairline,
+                    ),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 10.dp, top = 12.dp),
+                ) {
+                    Text(
+                        text = lightGuide.badgeText,
+                        color = if (lightTipPinned) LumiColors.Ivory else LumiColors.TextSecondary,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                }
             }
 
             if (referenceState.hasReference) {
@@ -1091,6 +1119,7 @@ private fun resolveGuidanceBanner(
     autoShotFired: Boolean,
     proactivityMode: ProactivityMode,
     filterReason: String?,
+    lightTipPinned: Boolean,
 ): GuidanceBanner? {
     val rollWarn = frame.rollDeg?.let { abs(it) > PoseGuidance.READY_MAX_ROLL_DEG } == true
     val pendingStep = frame.stepProgress?.takeIf { !it.satisfied }
@@ -1109,7 +1138,10 @@ private fun resolveGuidanceBanner(
         frame.hasTarget && rollWarn -> GuidanceBanner(frame.reason?.let { "$it · 调平画面" } ?: "轻轻调平画面")
         frame.directorCue != null -> GuidanceBanner("${frame.directorCue.category.badge} · ${frame.directorCue.tip}")
         frame.reason != null -> GuidanceBanner(frame.reason)
+        lightTipPinned && frame.lightGuidance != null -> GuidanceBanner(frame.lightGuidance.tip)
         filterReason != null -> GuidanceBanner(filterReason, subtle = true)
+        frame.lightGuidance?.isActionable == true && proactivityMode != ProactivityMode.QUIET ->
+            GuidanceBanner(frame.lightGuidance.tip, subtle = true)
         proactivityMode == ProactivityMode.QUIET -> null
         else -> null
     }

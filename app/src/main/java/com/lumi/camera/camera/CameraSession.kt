@@ -84,6 +84,7 @@ import com.lumi.camera.ui.ReferenceUiState
 import com.lumi.camera.vision.CloseupFraming
 import com.lumi.camera.vision.CloseupProposal
 import com.lumi.camera.vision.CompositionAnalyzer
+import com.lumi.camera.vision.LightGuidance
 import com.lumi.camera.vision.OutlineAttempt
 import com.lumi.camera.vision.PostShotRecrop
 import com.lumi.camera.vision.PostShotReview
@@ -134,6 +135,7 @@ internal data class Viewfinder(
     val directorCue: DirectorCue? = null,
     val stepProgress: StepProgress? = null,
     val referenceGuidance: ReferenceGuidance? = null,
+    val lightGuidance: LightGuidance? = null,
 )
 
 internal data class ViewfinderZoom(val ratio: Float = 1f, val min: Float = 1f, val max: Float = 1f,
@@ -673,6 +675,7 @@ internal class CameraSession(
                 currentZoom = zoom.ratio,
                 zoomStops = zoom.keyRatios,
                 maxZoom = zoom.max,
+                highlightSpot = fresh.lumaStats?.lightGuidance?.sourceUv,
             )
             latestCloseups = proposals
             latestCloseupFrame = if (proposals.isNotEmpty()) fresh else null
@@ -699,6 +702,7 @@ internal class CameraSession(
             emptyList()
         }
         val geometry = active?.target?.geometry ?: identified?.geometry
+        val liveLightGuidance = fresh?.lumaStats?.lightGuidance
         if (geometry == null) {
             onFrame(Viewfinder(
                 canRemember = current != null,
@@ -706,6 +710,7 @@ internal class CameraSession(
                 candidates = candidateOverlays,
                 closeups = closeupOverlays,
                 tapPoint = pendingTapPreview,
+                lightGuidance = liveLightGuidance,
             ))
             return
         }
@@ -791,6 +796,7 @@ internal class CameraSession(
             directorCue = active?.target?.directorCue,
             stepProgress = if (active?.target?.stepDirection != null) latestStepProgress else null,
             referenceGuidance = active?.target?.referenceGuidance,
+            lightGuidance = liveLightGuidance,
         ))
     }
 
@@ -932,6 +938,7 @@ internal class CameraSession(
             highlightClipPct = stats?.highlightClipPct,
             shadowClipPct = stats?.shadowClipPct,
             subjectVsBgDiff = stats?.subjectVsBgDiff,
+            lightGuidance = stats?.lightGuidance,
         )
     }
 

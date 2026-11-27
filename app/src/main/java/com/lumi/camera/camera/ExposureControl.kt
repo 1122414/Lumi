@@ -2,6 +2,7 @@ package com.lumi.camera.camera
 
 import android.hardware.camera2.params.RggbChannelVector
 import com.lumi.camera.shotplan.AiExposureSuggestion
+import com.lumi.camera.vision.LightGuidance
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.ln
@@ -54,6 +55,7 @@ internal data class LumaStats(
     val highlightClipPct: Int,
     val shadowClipPct: Int,
     val subjectVsBgDiff: Int? = null,
+    val lightGuidance: LightGuidance? = null,
 )
 
 internal data class LiveTelemetry(
@@ -66,6 +68,7 @@ internal data class LiveTelemetry(
     val highlightClipPct: Int? = null,
     val shadowClipPct: Int? = null,
     val subjectVsBgDiff: Int? = null,
+    val lightGuidance: LightGuidance? = null,
 ) {
     fun hudSummary(): String {
         val parts = mutableListOf<String>()
@@ -108,6 +111,7 @@ internal data class LiveTelemetry(
             }
             parts += lightingTag
         }
+        lightGuidance?.let { parts += it.promptTag }
         if (parts.isEmpty()) return null
         val hw = "硬件支持ISO[${capabilities.isoRange.first}-${capabilities.isoRange.last}]、EV[${String.format(Locale.ROOT, "%.1f", capabilities.minEv)}~+${String.format(Locale.ROOT, "%.1f", capabilities.maxEv)}]" +
             if (capabilities.hasVariableAperture) "、光圈${capabilities.apertures}" else "、固定光圈"

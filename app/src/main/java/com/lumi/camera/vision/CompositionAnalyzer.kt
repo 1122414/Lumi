@@ -231,39 +231,99 @@ internal class CompositionAnalyzer(
         var subjCount = 0
         var bgSum = 0
         var bgCount = 0
+        var leftSum = 0; var leftCount = 0
+        var rightSum = 0; var rightCount = 0
+        var topSum = 0; var topCount = 0
+        var bottomSum = 0; var bottomCount = 0
+        var brightWeightSum = 0.0
+        var brightX = 0.0
+        var brightY = 0.0
+
+        fun readY(nx: Double, ny: Double): Int? {
+            val px = (nx.coerceIn(0.01, 0.99) * ref.width).toFloat()
+            val py = (ny.coerceIn(0.01, 0.99) * ref.height).toFloat()
+            val raw = frame.referenceToAnalysis(px, py)
+            val rx = raw.x.toInt().coerceIn(0, image.width - 1)
+            val ry = raw.y.toInt().coerceIn(0, image.height - 1)
+            val idx = start + ry * yPlane.rowStride + rx * yPlane.pixelStride
+            return if (idx in 0 until buf.limit()) buf.get(idx).toInt() and 0xFF else null
+        }
+
         for (row in 1..6) {
             val ny = row / 7.0
-            val py = (ny * ref.height).toFloat()
             for (col in 1..6) {
                 val nx = col / 7.0
-                val px = (nx * ref.width).toFloat()
-                val raw = frame.referenceToAnalysis(px, py)
-                val rx = raw.x.toInt().coerceIn(0, image.width - 1)
-                val ry = raw.y.toInt().coerceIn(0, image.height - 1)
-                val idx = start + ry * yPlane.rowStride + rx * yPlane.pixelStride
-                if (idx in 0 until buf.limit()) {
-                    val y = buf.get(idx).toInt() and 0xFF
-                    sum += y
-                    count++
-                    if (y >= 242) highlights++
-                    if (y <= 24) shadows++
-                    if (nx in centerBox.left..centerBox.right && ny in centerBox.top..centerBox.bottom) {
-                        subjSum += y
-                        subjCount++
-                    } else {
-                        bgSum += y
-                        bgCount++
-                    }
+                val y = readY(nx, ny) ?: continue
+                sum += y
+                count++
+                if (y >= 242) highlights++
+                if (y <= 24) shadows++
+                if (col <= 2) { leftSum += y; leftCount++ }
+                if (col >= 5) { rightSum += y; rightCount++ }
+                if (row <= 2) { topSum += y; topCount++ }
+                if (row >= 5) { bottomSum += y; bottomCount++ }
+                if (y >= 175) {
+                    val w = (y - 165).toDouble()
+                    brightWeightSum += w
+                    brightX += nx * w
+                    brightY += ny * w
+                }
+                if (nx in centerBox.left..centerBox.right && ny in centerBox.top..centerBox.bottom) {
+                    subjSum += y
+                    subjCount++
+                } else {
+                    bgSum += y
+                    bgCount++
                 }
             }
         }
         if (count == 0) return null
+        val meanLuma = sum / count
         val diff = if (subjCount >= 2 && bgCount >= 4) (subjSum / subjCount) - (bgSum / bgCount) else null
+        val highlightSpot = if (brightWeightSum > 0.0) {
+            com.lumi.camera.guidance.Uv(
+                (brightX / brightWeightSum).coerceIn(0.08, 0.92),
+                (brightY / brightWeightSum).coerceIn(0.08, 0.92),
+            )
+        } else null
+
+        var sLeft: Int? = null
+        var sRight: Int? = null
+        var sTop: Int? = null
+        var sBottom: Int? = null
+        if (subjectBox != null) {
+            val cx = (subjectBox.left + subjectBox.right) * 0.5
+            val cy = (subjectBox.top + subjectBox.bottom) * 0.5
+            val sw = (subjectBox.right - subjectBox.left).coerceAtLeast(0.04)
+            val sh = (subjectBox.bottom - subjectBox.top).coerceAtLeast(0.04)
+            sLeft = readY(cx - sw * 0.26, cy)
+            sRight = readY(cx + sw * 0.26, cy)
+            sTop = readY(cx, cy - sh * 0.26)
+            sBottom = readY(cx, cy + sh * 0.26)
+        }
+
+        val lightGuidance = LightFinder.analyze(
+            LightSample(
+                meanLuma = meanLuma,
+                leftMean = if (leftCount > 0) leftSum / leftCount else meanLuma,
+                rightMean = if (rightCount > 0) rightSum / rightCount else meanLuma,
+                topMean = if (topCount > 0) topSum / topCount else meanLuma,
+                bottomMean = if (bottomCount > 0) bottomSum / bottomCount else meanLuma,
+                subjectVsBgDiff = diff,
+                subjectLeftMean = sLeft,
+                subjectRightMean = sRight,
+                subjectTopMean = sTop,
+                subjectBottomMean = sBottom,
+                highlightSpot = highlightSpot,
+                hasFace = subjectBox != null,
+            ),
+        )
         return LumaStats(
-            meanLuma = sum / count,
+            meanLuma = meanLuma,
             highlightClipPct = highlights * 100 / count,
             shadowClipPct = shadows * 100 / count,
             subjectVsBgDiff = diff,
+            lightGuidance = lightGuidance,
         )
     }
 
