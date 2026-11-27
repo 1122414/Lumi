@@ -1359,7 +1359,9 @@ private fun CameraScreen(
 
             Box(Modifier.width(86.dp), contentAlignment = Alignment.CenterEnd) {
                 val aiEnabled = bound && !zoom.changing && proactivityMode != ProactivityMode.QUIET
-                val aiBusy = recommendationStatus != null && !frame.hasTarget
+                val statusText = recommendationStatus
+                val aiBusy = statusText != null && !frame.hasTarget &&
+                    (statusText.contains("正在") || statusText.contains("精修中"))
                 Surface(
                     onClick = session::recommend,
                     enabled = aiEnabled,

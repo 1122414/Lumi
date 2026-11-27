@@ -41,8 +41,8 @@ android {
         applicationId = "com.lumi.camera"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.1.1"
+        versionCode = 7
+        versionName = "0.1.2"
         modelSettings.forEach { buildConfigField("String", it, "\"\"") }
         gatewaySettings.forEach { buildConfigField("String", it, buildSetting(it)) }
     }

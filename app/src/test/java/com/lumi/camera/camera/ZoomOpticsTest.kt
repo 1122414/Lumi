@@ -20,6 +20,20 @@ class ZoomOpticsTest {
         assertEquals(listOf(0.6f, 1f, 3.5f), lensZoomStops(1f, listOf(0.6f, 1f, 3.5f, Float.NaN), "other"))
     }
 
+    @Test fun resolveZoomStopsSynthesizesMultiFocalShortcutsWhenPhysicalIdsAreHidden() {
+        // OnePlus Ace 2 / Ace 2 Pro (logical camera exposes 1..10× without physicalCameraIds)
+        assertEquals(listOf(1f, 2f, 3f, 5f), resolveZoomStops(listOf(1f), 1f, 10f, rear = true))
+        // Devices exposing ultrawide via minZoomRatio=0.6f without physicalCameraIds
+        assertEquals(listOf(0.6f, 1f, 2f, 3f), resolveZoomStops(listOf(1f), 0.6f, 10f, rear = true))
+        // PKX110 keeps its 1×, 2×, 4× layout
+        assertEquals(listOf(1f, 2f, 4f), resolveZoomStops(listOf(1f, 2f, 4f), 1f, 20f, rear = true))
+        // Flagship triple-lens (0.6×, 1×, 3×) gains 2× shortcut
+        assertEquals(listOf(0.6f, 1f, 2f, 3f), resolveZoomStops(listOf(0.6f, 1f, 3f), 0.6f, 30f, rear = true))
+        // Front camera exposes wide selfie if min < 0.92f without cluttering telephoto stops
+        assertEquals(listOf(0.8f, 1f), resolveZoomStops(listOf(1f), 0.8f, 2f, rear = false))
+        assertEquals(listOf(1f), resolveZoomStops(listOf(1f), 1f, 2f, rear = false))
+    }
+
     @Test fun dialAccumulatesSmallMovesAndCanStopBetweenLenses() {
         val distance = -0.63 * kotlin.math.ln(2.8 / 2.0)
         var raw = 2.0

@@ -515,9 +515,13 @@ internal class CameraSession(
             refreshFilterState()
             val lensStops = rearZoomStops(context, camera.cameraInfo)
             val ranges = Observer<ZoomState> { range ->
-                if (this.camera === camera && (zoom.min != range.minZoomRatio || zoom.max != range.maxZoomRatio)) {
-                    zoom = zoom.copy(min = range.minZoomRatio, max = range.maxZoomRatio,
-                        keyRatios = lensStops.filter { it in range.minZoomRatio..range.maxZoomRatio })
+                val resolvedStops = resolveZoomStops(lensStops, range.minZoomRatio, range.maxZoomRatio, rear = !front)
+                if (this.camera === camera && (zoom.min != range.minZoomRatio || zoom.max != range.maxZoomRatio || zoom.keyRatios != resolvedStops)) {
+                    zoom = zoom.copy(
+                        min = range.minZoomRatio,
+                        max = range.maxZoomRatio,
+                        keyRatios = resolvedStops,
+                    )
                     onZoom(zoom)
                     setZoom(desiredZoom)
                 }
