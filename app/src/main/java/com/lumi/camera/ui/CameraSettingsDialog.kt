@@ -47,6 +47,7 @@ internal fun CameraSettingsDialog(
     onToggleGrid: (Boolean) -> Unit,
     onOpenModelSettings: () -> Unit,
     onOpenPrivacyHealth: () -> Unit,
+    onReplayOnboarding: () -> Unit,
     onResetPreferences: () -> Unit,
     onRememberComposition: () -> Unit,
     onOpenDiagnostics: () -> Unit,
@@ -213,7 +214,39 @@ internal fun CameraSettingsDialog(
 
                 HorizontalDivider(color = LumiColors.Hairline)
 
-                // 5. Privacy, Device Compatibility & Session Health
+                // 5. Replay Onboarding Guide
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0x10FFFFFF))
+                        .clickable {
+                            onDismiss()
+                            onReplayOnboarding()
+                        }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("重新查看新手引导", color = LumiColors.TextPrimary, fontSize = 13.sp)
+                        Text(
+                            text = "快速回顾 AI 指导、构图模式、参考图与快门用法",
+                            color = LumiColors.TextMuted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text(
+                        text = "查看 ›",
+                        color = LumiColors.Ivory,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+
+                // 6. Privacy, Device Compatibility & Session Health
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

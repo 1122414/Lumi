@@ -199,11 +199,12 @@ internal fun TopIconButton(
     description: String,
     active: Boolean = false,
     enabled: Boolean = true,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
     content: @Composable () -> Unit,
 ) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .size(38.dp)
             .clip(CircleShape)
             .background(if (active) Color(0x1AF2E6C9) else Color.Transparent)
@@ -239,9 +240,13 @@ internal fun ViewfinderCornerCircle(
 }
 
 @Composable
-internal fun MinimalPresetTabRow(selection: PresetSelection, onSelect: (CompositionPreset) -> Unit) {
+internal fun MinimalPresetTabRow(
+    selection: PresetSelection,
+    onSelect: (CompositionPreset) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 18.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
@@ -326,6 +331,7 @@ internal fun TactileShutterButton(
     ready: Boolean,
     autoShootProgress: Float,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -340,7 +346,7 @@ internal fun TactileShutterButton(
         else -> LumiColors.TextPrimary
     }
     Box(
-        modifier = Modifier
+        modifier = modifier
             .size(74.dp)
             .clip(CircleShape)
             .clickable(

@@ -39,7 +39,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -72,6 +71,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -82,6 +82,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -94,6 +95,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -204,12 +207,11 @@ class MainActivity : ComponentActivity() {
                     surface = LumiColors.SurfaceDark,
                 ),
             ) {
-                Column(
+                Box(
                     Modifier
                         .fillMaxSize()
                         .background(LumiColors.Obsidian)
                         .safeDrawingPadding(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     if (allowed) {
                         val initial by produceState<ModelConfig?>(null, store) {
@@ -226,20 +228,16 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     } else {
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            if (requested) "没有相机权限，无法取景。" else "Lumi 需要相机权限来取景和拍照。",
-                            color = LumiColors.TextPrimary,
+                        CameraPermissionGate(
+                            requested = requested,
+                            onRequestPermission = permissions::requestCamera,
+                            onOpenSettings = {
+                                startActivity(Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.fromParts("package", packageName, null),
+                                ))
+                            },
                         )
-                        Spacer(Modifier.height(12.dp))
-                        Button(permissions::requestCamera) { Text("允许使用相机") }
-                        if (requested) TextButton({
-                            startActivity(Intent(
-                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.fromParts("package", packageName, null),
-                            ))
-                        }) { Text("打开系统设置", color = LumiColors.Ivory) }
-                        Spacer(Modifier.weight(1f))
                     }
                 }
             }
@@ -255,7 +253,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun ColumnScope.CameraScreen(
+private fun CameraScreen(
     owner: MainActivity,
     store: ModelConfigStore,
     initial: ModelConfig,
@@ -290,6 +288,12 @@ private fun ColumnScope.CameraScreen(
     var cameraSettingsOpen by remember { mutableStateOf(false) }
     var privacyHealthOpen by remember { mutableStateOf(false) }
     var firstLaunchConsentOpen by remember { mutableStateOf(!PrivacyConsentStore.hasAccepted(context)) }
+    var onboardingFlow by remember { mutableStateOf(OnboardingStore.load(context)) }
+    val onboardingAnchors = remember { mutableStateMapOf<OnboardingTarget, Rect>() }
+    fun updateOnboarding(next: OnboardingFlow) {
+        onboardingFlow = next
+        OnboardingStore.save(context, next)
+    }
     var aiMenuOpen by remember { mutableStateOf(false) }
     var diagnosticOpen by remember { mutableStateOf(false) }
     var quickControlsOpen by remember { mutableStateOf(false) }
@@ -411,7 +415,13 @@ private fun ColumnScope.CameraScreen(
             { presetSelection = it },
             onCaptured = { review ->
                 lastReview = review
-                reviewBannerVisible = true
+                val nextOnboarding = onboardingFlow.onPhotoCaptured()
+                if (nextOnboarding != onboardingFlow) {
+                    updateOnboarding(nextOnboarding)
+                    reviewBannerVisible = false
+                } else {
+                    reviewBannerVisible = true
+                }
                 refreshGallery()
             },
             onExposure = { nextExp ->
@@ -537,8 +547,15 @@ private fun ColumnScope.CameraScreen(
         onDispose { listener.disable() }
     }
 
+    val onboardingVisible = !firstLaunchConsentOpen && onboardingFlow.isOverlayVisible
+    LaunchedEffect(onboardingFlow.step) {
+        if (onboardingFlow.step == OnboardingStep.COMPOSITION_MODES) {
+            activeTray = BottomTray.NONE
+        }
+    }
     val anyDialogOpen = cameraSettingsOpen || modelSettingsOpen || diagnosticOpen ||
-        activeReviewDialogTarget != null || referenceDialogOpen || galleryViewerOpen
+        activeReviewDialogTarget != null || referenceDialogOpen || galleryViewerOpen ||
+        firstLaunchConsentOpen || privacyHealthOpen || onboardingVisible
     DisposableEffect(owner, bound, zoom.changing, anyDialogOpen, timerOption, countdownRemaining) {
         owner.hardwareShutterHandler = if (!anyDialogOpen) {
             {
@@ -629,6 +646,11 @@ private fun ColumnScope.CameraScreen(
         else -> "可用"
     }
 
+    Box(Modifier.fillMaxSize()) {
+    Column(
+        Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
     // 1. Minimalist Top Bar (Wordmark + Quick Ratio/Timer pill | Flash, Flip, Reference, AI mode, Settings)
     Row(
         modifier = Modifier
@@ -734,6 +756,9 @@ private fun ColumnScope.CameraScreen(
             TopIconButton(
                 description = "导入或管理参考图",
                 active = referenceState.hasReference,
+                modifier = Modifier.onGloballyPositioned { coords ->
+                    onboardingAnchors[OnboardingTarget.REFERENCE_PHOTO] = coords.boundsInRoot()
+                },
                 onClick = {
                     if (referenceState.hasReference) referenceDialogOpen = true
                     else launchReferencePicker()
@@ -1013,8 +1038,19 @@ private fun ColumnScope.CameraScreen(
                         },
                     )
                 }
-                primaryBanner?.let { banner ->
-                    ViewfinderGuidancePill(banner = banner)
+                val displayedBanner = primaryBanner ?: if (onboardingVisible && onboardingFlow.step == OnboardingStep.AI_GUIDANCE) {
+                    GuidanceBanner(text = "实时观察画面 · 准备给出构图建议", subtle = true)
+                } else {
+                    null
+                }
+                Box(
+                    modifier = Modifier.onGloballyPositioned { coords ->
+                        onboardingAnchors[OnboardingTarget.AI_GUIDANCE] = coords.boundsInRoot()
+                    },
+                ) {
+                    displayedBanner?.let { banner ->
+                        ViewfinderGuidancePill(banner = banner)
+                    }
                 }
                 val targetZoom = frame.suggestedZoom
                 val step = frame.stepProgress
@@ -1272,7 +1308,13 @@ private fun ColumnScope.CameraScreen(
                 )
             }
             BottomTray.NONE -> {
-                MinimalPresetTabRow(presetSelection, onSelect = session::selectPreset)
+                MinimalPresetTabRow(
+                    selection = presetSelection,
+                    onSelect = session::selectPreset,
+                    modifier = Modifier.onGloballyPositioned { coords ->
+                        onboardingAnchors[OnboardingTarget.COMPOSITION_MODES] = coords.boundsInRoot()
+                    },
+                )
                 TelemetryStrip(telemetry = exposureState.telemetry)
             }
         }
@@ -1310,6 +1352,9 @@ private fun ColumnScope.CameraScreen(
                 ready = frame.ready || countdownRemaining > 0,
                 autoShootProgress = if (autoShoot) autoShootProgress else 0f,
                 onClick = ::triggerShutter,
+                modifier = Modifier.onGloballyPositioned { coords ->
+                    onboardingAnchors[OnboardingTarget.SHUTTER] = coords.boundsInRoot()
+                },
             )
 
             Box(Modifier.width(86.dp), contentAlignment = Alignment.CenterEnd) {
@@ -1358,6 +1403,25 @@ private fun ColumnScope.CameraScreen(
             }
         }
     }
+    } // end camera Column
+
+    if (onboardingVisible) {
+        OnboardingOverlay(
+            flow = onboardingFlow,
+            anchorsInRoot = onboardingAnchors,
+            firstShotReview = lastReview,
+            onStartGuide = { updateOnboarding(onboardingFlow.startGuide()) },
+            onNext = { updateOnboarding(onboardingFlow.next()) },
+            onPrevious = { updateOnboarding(onboardingFlow.previous()) },
+            onSkip = { updateOnboarding(onboardingFlow.skip()) },
+            onOpenFirstShotReview = {
+                updateOnboarding(onboardingFlow.dismissFirstShot())
+                lastReview?.let { activeReviewDialogTarget = it }
+            },
+            onDismissFirstShot = { updateOnboarding(onboardingFlow.dismissFirstShot()) },
+        )
+    }
+    } // end root Box
 
     // Dialogs & Sheets
     if (cameraSettingsOpen) {
@@ -1382,6 +1446,10 @@ private fun ColumnScope.CameraScreen(
             },
             onOpenModelSettings = { modelSettingsOpen = true },
             onOpenPrivacyHealth = { privacyHealthOpen = true },
+            onReplayOnboarding = {
+                activeTray = BottomTray.NONE
+                updateOnboarding(onboardingFlow.replay())
+            },
             onResetPreferences = session::resetPreferences,
             onRememberComposition = session::rememberComposition,
             onOpenDiagnostics = { diagnosticOpen = true },
