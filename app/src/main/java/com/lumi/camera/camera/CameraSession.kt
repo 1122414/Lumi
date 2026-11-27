@@ -85,6 +85,7 @@ import com.lumi.camera.vision.CloseupFraming
 import com.lumi.camera.vision.CloseupProposal
 import com.lumi.camera.vision.CompositionAnalyzer
 import com.lumi.camera.vision.LightGuidance
+import com.lumi.camera.vision.LightGuidanceStabilizer
 import com.lumi.camera.vision.OutlineAttempt
 import com.lumi.camera.vision.PostShotRecrop
 import com.lumi.camera.vision.PostShotReview
@@ -230,6 +231,8 @@ internal class CameraSession(
     private var latestLensZoom = 1f
     private var latestShift: TrackedShift? = null
     private var latestStepProgress: StepProgress? = null
+    private var stepSatisfiedSinceNs: Long? = null
+    private val lightStabilizer = LightGuidanceStabilizer()
     private var trackerLostSinceNs: Long? = null
     private var subjectLostNotified = false
     private var poses: CameraPose? = null
@@ -662,55 +665,18 @@ internal class CameraSession(
                 }
             }
         }.orEmpty()
-        val closeupOverlays = if (fresh != null &&
-            active == null &&
-            requests.active == null &&
-            proactivityMode != ProactivityMode.QUIET &&
-            lensFacing == CameraSelector.LENS_FACING_BACK &&
-            !zoom.changing &&
-            zoom.max > zoom.ratio + 0.45f) {
-            val proposals = CloseupFraming.generate(
-                faces = fresh.faces,
-                subjectBounds = fresh.box,
-                currentZoom = zoom.ratio,
-                zoomStops = zoom.keyRatios,
-                maxZoom = zoom.max,
-                highlightSpot = fresh.lumaStats?.lightGuidance?.sourceUv,
-            )
-            latestCloseups = proposals
-            latestCloseupFrame = if (proposals.isNotEmpty()) fresh else null
-            if (proposals.isEmpty()) emptyList() else {
-                val refSize = fresh.geometry.referenceSize
-                val map = FrameMapping(fresh.geometry, size)
-                proposals.map { p ->
-                    val tl = map.referenceToPreview(Point((p.box.left * refSize.width).toFloat(), (p.box.top * refSize.height).toFloat()))
-                    val br = map.referenceToPreview(Point((p.box.right * refSize.width).toFloat(), (p.box.bottom * refSize.height).toFloat()))
-                    CloseupOverlay(
-                        id = p.id,
-                        label = p.chipLabel,
-                        targetZoom = p.targetZoom,
-                        left = minOf(tl.x, br.x),
-                        top = minOf(tl.y, br.y),
-                        right = maxOf(tl.x, br.x),
-                        bottom = maxOf(tl.y, br.y),
-                    )
-                }
-            }
-        } else {
+        val stabilizedLight = lightStabilizer.update(fresh?.lumaStats?.lightGuidance, now)
+        val geometry = active?.target?.geometry ?: identified?.geometry
+        if (geometry == null) {
             latestCloseups = emptyList()
             latestCloseupFrame = null
-            emptyList()
-        }
-        val geometry = active?.target?.geometry ?: identified?.geometry
-        val liveLightGuidance = fresh?.lumaStats?.lightGuidance
-        if (geometry == null) {
             onFrame(Viewfinder(
                 canRemember = current != null,
                 rollDeg = rollDeg,
                 candidates = candidateOverlays,
-                closeups = closeupOverlays,
+                closeups = emptyList(),
                 tapPoint = pendingTapPreview,
-                lightGuidance = liveLightGuidance,
+                lightGuidance = null,
             ))
             return
         }
@@ -765,6 +731,50 @@ internal class CameraSession(
                 }
             }
         }
+        val activePersonOutline = active?.target?.outline?.takeIf { it.person }
+        val closeupOverlays = if (fresh != null &&
+            active != null &&
+            activePersonOutline != null &&
+            !subjectLost &&
+            requests.active == null &&
+            proactivityMode != ProactivityMode.QUIET &&
+            lensFacing == CameraSelector.LENS_FACING_BACK &&
+            !zoom.changing &&
+            zoom.max > zoom.ratio + 0.45f) {
+            val livePersonBounds = if (pose != null && lens != null) {
+                active.target.liveSubjectBounds(pose, lens, latestShift)
+            } else activePersonOutline.bounds
+            val proposals = CloseupFraming.generateForSelectedPerson(
+                selectedPersonBounds = livePersonBounds,
+                faces = fresh.faces,
+                currentZoom = zoom.ratio,
+                zoomStops = zoom.keyRatios,
+                maxZoom = zoom.max,
+            )
+            latestCloseups = proposals
+            latestCloseupFrame = if (proposals.isNotEmpty()) fresh else null
+            if (proposals.isEmpty()) emptyList() else {
+                val refSize = fresh.geometry.referenceSize
+                val map = FrameMapping(fresh.geometry, size)
+                proposals.map { p ->
+                    val tl = map.referenceToPreview(Point((p.box.left * refSize.width).toFloat(), (p.box.top * refSize.height).toFloat()))
+                    val br = map.referenceToPreview(Point((p.box.right * refSize.width).toFloat(), (p.box.bottom * refSize.height).toFloat()))
+                    CloseupOverlay(
+                        id = p.id,
+                        label = p.chipLabel,
+                        targetZoom = p.targetZoom,
+                        left = minOf(tl.x, br.x),
+                        top = minOf(tl.y, br.y),
+                        right = maxOf(tl.x, br.x),
+                        bottom = maxOf(tl.y, br.y),
+                    )
+                }
+            }
+        } else {
+            latestCloseups = emptyList()
+            latestCloseupFrame = null
+            emptyList()
+        }
         active?.trace(guide, outline.any { it != null }, now)
         val evidence = when {
             active == null -> GuideEvidence.NO_OBSERVATION
@@ -778,6 +788,21 @@ internal class CameraSession(
         }
         val viewpointDrifted = active != null && pose != null && lens != null &&
             active.target.isViewpointDrifted(pose, lens)
+        val rawStep = if (active?.target?.stepDirection != null) latestStepProgress else null
+        val visibleStep = when {
+            rawStep == null || viewpointDrifted -> {
+                stepSatisfiedSinceNs = null
+                null
+            }
+            rawStep.satisfied -> {
+                val since = stepSatisfiedSinceNs ?: now.also { stepSatisfiedSinceNs = it }
+                if (now - since < STEP_SATISFIED_DISPLAY_NS) rawStep else null
+            }
+            else -> {
+                stepSatisfiedSinceNs = null
+                rawStep
+            }
+        }
         lastReadyState = guide.ready
         onFrame(Viewfinder(
             canRemember = current != null,
@@ -791,12 +816,13 @@ internal class CameraSession(
             rollDeg = guide.rollDeg ?: rollDeg,
             suggestedZoom = activeSuggestedZoom,
             candidates = candidateOverlays,
+            closeups = closeupOverlays,
             tapPoint = pendingTapPreview,
             viewpointDrifted = viewpointDrifted,
             directorCue = active?.target?.directorCue,
-            stepProgress = if (active?.target?.stepDirection != null) latestStepProgress else null,
+            stepProgress = visibleStep,
             referenceGuidance = active?.target?.referenceGuidance,
-            lightGuidance = liveLightGuidance,
+            lightGuidance = if (active != null) stabilizedLight else null,
         ))
     }
 
@@ -1292,6 +1318,7 @@ internal class CameraSession(
         selection = null
         latestShift = null
         latestStepProgress = null
+        stepSatisfiedSinceNs = null
         trackerLostSinceNs = null
         subjectLostNotified = false
         lastReadyState = false
@@ -1740,6 +1767,8 @@ internal class CameraSession(
         latestLensZoom = 1f
         latestShift = null
         latestStepProgress = null
+        stepSatisfiedSinceNs = null
+        lightStabilizer.reset()
         trackerLostSinceNs = null
         subjectLostNotified = false
         lastReadyState = false
@@ -1781,5 +1810,6 @@ internal class CameraSession(
     companion object {
         private const val SUBJECT_LOST_NS = 450_000_000L
         private const val ZOOM_SETTLE_NS = 260_000_000L
+        private const val STEP_SATISFIED_DISPLAY_NS = 1_200_000_000L
     }
 }

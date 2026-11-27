@@ -7,11 +7,12 @@ import org.junit.Test
 class S7CloseupFramingTest {
 
     @Test
-    fun `panoramic portrait generates half-body and face closeup boxes snapped to optical zoom stops`() {
-        val distantFace = FaceBox(0.44, 0.28, 0.56, 0.42) // small face in wide 1x shot
-        val proposals = CloseupFraming.generate(
+    fun `selected distant person generates half-body and face closeup boxes snapped to optical stops`() {
+        val selectedPerson = FaceBox(0.36, 0.24, 0.64, 0.84)
+        val distantFace = FaceBox(0.44, 0.28, 0.56, 0.42)
+        val proposals = CloseupFraming.generateForSelectedPerson(
+            selectedPersonBounds = selectedPerson,
             faces = listOf(distantFace),
-            subjectBounds = null,
             currentZoom = 1.0f,
             zoomStops = listOf(0.6f, 1.0f, 2.0f, 3.0f),
             maxZoom = 8.0f,
@@ -19,38 +20,54 @@ class S7CloseupFramingTest {
         assertEquals(2, proposals.size)
         assertEquals(CloseupKind.HALF_BODY, proposals[0].kind)
         assertEquals(CloseupKind.FACE, proposals[1].kind)
-        assertTrue(proposals[0].targetZoom >= 1.5f)
-        assertTrue(proposals[1].targetZoom >= proposals[0].targetZoom)
         assertEquals(2.0f, proposals[0].targetZoom, 0.01f)
         assertEquals(3.0f, proposals[1].targetZoom, 0.01f)
     }
 
     @Test
-    fun `closeup proposals stay hidden once user is already zoomed in`() {
-        val face = FaceBox(0.40, 0.25, 0.55, 0.42)
-        val proposals = CloseupFraming.generate(
-            faces = listOf(face),
-            subjectBounds = null,
-            currentZoom = 2.0f,
-            zoomStops = listOf(0.6f, 1.0f, 2.0f, 3.0f),
-            maxZoom = 8.0f,
+    fun `closeup boxes stay hidden when no subject selected or no matching face`() {
+        val distantFace = FaceBox(0.44, 0.28, 0.56, 0.42)
+        assertTrue(
+            CloseupFraming.generateForSelectedPerson(
+                selectedPersonBounds = null,
+                faces = listOf(distantFace),
+                currentZoom = 1.0f,
+                zoomStops = listOf(1.0f, 2.0f, 3.0f),
+                maxZoom = 8.0f,
+            ).isEmpty(),
         )
-        assertTrue(proposals.isEmpty())
+        assertTrue(
+            CloseupFraming.generateForSelectedPerson(
+                selectedPersonBounds = FaceBox(0.36, 0.24, 0.64, 0.84),
+                faces = emptyList(),
+                currentZoom = 1.0f,
+                zoomStops = listOf(1.0f, 2.0f, 3.0f),
+                maxZoom = 8.0f,
+            ).isEmpty(),
+        )
     }
 
     @Test
-    fun `scenic wide shot without face generates light-detail closeup around subject box`() {
-        val scenicSubject = FaceBox(0.38, 0.36, 0.62, 0.62)
-        val proposals = CloseupFraming.generate(
-            faces = emptyList(),
-            subjectBounds = scenicSubject,
-            currentZoom = 1.0f,
-            zoomStops = listOf(1.0f, 2.0f, 4.0f),
-            maxZoom = 8.0f,
+    fun `closeup proposals stay hidden when person is already close or user is zoomed in`() {
+        val closeFace = FaceBox(0.32, 0.18, 0.68, 0.54)
+        assertTrue(
+            CloseupFraming.generateForSelectedPerson(
+                selectedPersonBounds = FaceBox(0.20, 0.14, 0.80, 0.92),
+                faces = listOf(closeFace),
+                currentZoom = 1.0f,
+                zoomStops = listOf(1.0f, 2.0f, 3.0f),
+                maxZoom = 8.0f,
+            ).isEmpty(),
         )
-        assertEquals(1, proposals.size)
-        assertEquals(CloseupKind.LIGHT_DETAIL, proposals[0].kind)
-        assertEquals(2.0f, proposals[0].targetZoom, 0.01f)
+        assertTrue(
+            CloseupFraming.generateForSelectedPerson(
+                selectedPersonBounds = FaceBox(0.36, 0.24, 0.64, 0.84),
+                faces = listOf(FaceBox(0.44, 0.28, 0.56, 0.42)),
+                currentZoom = 2.0f,
+                zoomStops = listOf(1.0f, 2.0f, 3.0f),
+                maxZoom = 8.0f,
+            ).isEmpty(),
+        )
     }
 
     @Test

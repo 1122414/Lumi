@@ -314,7 +314,6 @@ private fun ColumnScope.CameraScreen(
     var autoShootProgress by remember { mutableFloatStateOf(0f) }
     var autoShotFired by remember { mutableStateOf(false) }
     var wasReady by remember { mutableStateOf(false) }
-    var lightTipPinned by remember { mutableStateOf(false) }
 
     fun setFailure(failed: Boolean) {
         if (lastFailed != failed) {
@@ -655,9 +654,9 @@ private fun ColumnScope.CameraScreen(
                     if (gap == -1) path.close()
                     drawPath(
                         path,
-                        LumiColors.Emerald.copy(alpha = 0.72f),
+                        Color(0xFF46A9FF),
                         style = Stroke(
-                            width = 1.6.dp.toPx(),
+                            width = 2.dp.toPx(),
                             pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx())),
                         ),
                     )
@@ -680,7 +679,7 @@ private fun ColumnScope.CameraScreen(
                 drawCircle(Color.White.copy(alpha = 0.9f), 2.5.dp.toPx(), mid)
             }
 
-            // Single clean top-center frosted guidance pill + optional actionable chip
+            // Single clean top-center frosted guidance pill + at most one secondary action/progress chip
             val primaryBanner = remember(
                 frame,
                 bound,
@@ -689,8 +688,6 @@ private fun ColumnScope.CameraScreen(
                 autoShoot,
                 autoShotFired,
                 proactivityMode,
-                filterState.reason,
-                lightTipPinned,
             ) {
                 resolveGuidanceBanner(
                     frame = frame,
@@ -700,18 +697,14 @@ private fun ColumnScope.CameraScreen(
                     autoShoot = autoShoot,
                     autoShotFired = autoShotFired,
                     proactivityMode = proactivityMode,
-                    filterReason = filterState.reason,
-                    lightTipPinned = lightTipPinned,
                 )
             }
-            val lightGuide = frame.lightGuidance
-            val showLightBadge = lightGuide != null && lightGuide.isActionable && proactivityMode != ProactivityMode.QUIET
             Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(
                         top = 12.dp,
-                        start = if (showLightBadge) 84.dp else 16.dp,
+                        start = 16.dp,
                         end = if (referenceState.hasReference) 74.dp else 16.dp,
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -720,55 +713,39 @@ private fun ColumnScope.CameraScreen(
                 primaryBanner?.let { banner ->
                     ViewfinderGuidancePill(banner = banner)
                 }
-                frame.suggestedZoom?.let { targetZoom ->
-                    Surface(
-                        onClick = session::applySuggestedZoom,
-                        shape = RoundedCornerShape(18.dp),
-                        color = LumiColors.GlassDark,
-                        border = BorderStroke(1.dp, LumiColors.Ivory),
-                    ) {
-                        Text(
-                            text = "建议切至 ${SubjectCandidates.formatZoomLabel(targetZoom)} ›",
-                            color = LumiColors.Ivory,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                val targetZoom = frame.suggestedZoom
+                val step = frame.stepProgress
+                val refGuide = frame.referenceGuidance
+                when {
+                    targetZoom != null -> {
+                        Surface(
+                            onClick = session::applySuggestedZoom,
+                            shape = RoundedCornerShape(18.dp),
+                            color = LumiColors.GlassDark,
+                            border = BorderStroke(1.dp, LumiColors.Ivory),
+                        ) {
+                            Text(
+                                text = "建议切至 ${SubjectCandidates.formatZoomLabel(targetZoom)} ›",
+                                color = LumiColors.Ivory,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                            )
+                        }
+                    }
+                    step != null -> {
+                        StepProgressPill(step)
+                    }
+                    refGuide != null -> {
+                        ReferenceCoachBanner(refGuide)
+                    }
+                    else -> {
+                        AiExposureActionPill(
+                            state = exposureState,
+                            onApplyPending = session::applyPendingAiExposure,
+                            onRevertApplied = session::revertAiExposure,
                         )
                     }
-                }
-                frame.stepProgress?.let { step ->
-                    StepProgressPill(step)
-                }
-                frame.referenceGuidance?.let { refGuide ->
-                    ReferenceCoachBanner(refGuide)
-                }
-                AiExposureActionPill(
-                    state = exposureState,
-                    onApplyPending = session::applyPendingAiExposure,
-                    onRevertApplied = session::revertAiExposure,
-                )
-            }
-
-            if (showLightBadge && lightGuide != null) {
-                Surface(
-                    onClick = { lightTipPinned = !lightTipPinned },
-                    shape = RoundedCornerShape(14.dp),
-                    color = LumiColors.GlassDark,
-                    border = BorderStroke(
-                        1.dp,
-                        if (lightTipPinned) LumiColors.Ivory else LumiColors.Hairline,
-                    ),
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 10.dp, top = 12.dp),
-                ) {
-                    Text(
-                        text = lightGuide.badgeText,
-                        color = if (lightTipPinned) LumiColors.Ivory else LumiColors.TextSecondary,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                    )
                 }
             }
 
@@ -987,7 +964,7 @@ private fun ColumnScope.CameraScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.width(78.dp), contentAlignment = Alignment.CenterStart) {
+            Box(Modifier.width(86.dp), contentAlignment = Alignment.CenterStart) {
                 LastPhotoThumbSlot(
                     review = lastReview,
                     onClick = {
@@ -1004,28 +981,41 @@ private fun ColumnScope.CameraScreen(
                 onClick = onShoot,
             )
 
-            Box(Modifier.width(78.dp), contentAlignment = Alignment.CenterEnd) {
+            Box(Modifier.width(86.dp), contentAlignment = Alignment.CenterEnd) {
                 val aiEnabled = bound && !zoom.changing && configured && proactivityMode != ProactivityMode.QUIET
+                val aiBusy = recommendationStatus != null && !frame.hasTarget
                 Surface(
                     onClick = session::recommend,
                     enabled = aiEnabled,
                     shape = RoundedCornerShape(22.dp),
-                    color = if (aiEnabled) LumiColors.GlassSubtle else Color(0x12FFFFFF),
+                    color = when {
+                        !aiEnabled -> Color(0x16FFFFFF)
+                        aiBusy -> LumiColors.IvoryMuted
+                        else -> LumiColors.Ivory
+                    },
                     border = BorderStroke(
-                        width = 1.2.dp,
-                        color = if (aiEnabled) LumiColors.Ivory else LumiColors.Hairline,
+                        width = 1.dp,
+                        color = when {
+                            !aiEnabled -> LumiColors.Hairline
+                            aiBusy -> LumiColors.Ivory
+                            else -> LumiColors.Ivory
+                        },
                     ),
-                    modifier = Modifier.height(40.dp),
+                    modifier = Modifier.height(42.dp),
                 ) {
                     Box(
-                        modifier = Modifier.padding(horizontal = 14.dp),
+                        modifier = Modifier.padding(horizontal = 15.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            text = "AI 构图",
-                            color = if (aiEnabled) LumiColors.Ivory else LumiColors.TextMuted,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
+                            text = if (aiBusy) "分析中…" else "AI 构图",
+                            color = when {
+                                !aiEnabled -> LumiColors.TextMuted
+                                aiBusy -> LumiColors.Ivory
+                                else -> LumiColors.IvoryInk
+                            },
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                         )
                     }
@@ -1106,6 +1096,7 @@ private fun ColumnScope.CameraScreen(
 
 private data class GuidanceBanner(
     val text: String,
+    val subtitle: String? = null,
     val ready: Boolean = false,
     val subtle: Boolean = false,
 )
@@ -1118,11 +1109,14 @@ private fun resolveGuidanceBanner(
     autoShoot: Boolean,
     autoShotFired: Boolean,
     proactivityMode: ProactivityMode,
-    filterReason: String?,
-    lightTipPinned: Boolean,
 ): GuidanceBanner? {
     val rollWarn = frame.rollDeg?.let { abs(it) > PoseGuidance.READY_MAX_ROLL_DEG } == true
     val pendingStep = frame.stepProgress?.takeIf { !it.satisfied }
+    val secondaryTip = when {
+        frame.directorCue != null -> "${frame.directorCue.category.badge} · ${frame.directorCue.tip}"
+        frame.lightGuidance?.isActionable == true -> frame.lightGuidance.tip
+        else -> null
+    }
     return when {
         !bound -> GuidanceBanner(if (front) "正在打开前置相机" else "正在打开后置相机", subtle = true)
         recommendationStatus != null -> GuidanceBanner(recommendationStatus)
@@ -1130,18 +1124,26 @@ private fun resolveGuidanceBanner(
         frame.ready && pendingStep != null -> GuidanceBanner("构图已对齐 · ${pendingStep.direction.label}更干净", ready = true)
         frame.ready -> GuidanceBanner(
             text = frame.reason?.let { "构图就绪 · $it" } ?: "构图就绪 · 可以拍",
+            subtitle = secondaryTip,
             ready = true,
         )
-        frame.viewpointDrifted -> GuidanceBanner("视角已偏离，请回到推荐仰俯角")
-        frame.evidence == GuideEvidence.RETURN_DIRECTION -> GuidanceBanner("返回推荐构图方向")
+        frame.viewpointDrifted -> GuidanceBanner(
+            text = "视角已偏离，请回到推荐仰俯角",
+            subtitle = frame.reason,
+        )
+        frame.evidence == GuideEvidence.RETURN_DIRECTION -> GuidanceBanner(
+            text = frame.reason?.let { "返回推荐方向 · $it" } ?: "返回推荐构图方向",
+        )
         frame.hasTarget && frame.ring == null -> GuidanceBanner("正在找回主体")
-        frame.hasTarget && rollWarn -> GuidanceBanner(frame.reason?.let { "$it · 调平画面" } ?: "轻轻调平画面")
+        frame.hasTarget && rollWarn -> GuidanceBanner(
+            text = frame.reason?.let { "$it · 调平画面" } ?: "轻轻调平画面",
+            subtitle = secondaryTip,
+        )
+        frame.reason != null -> GuidanceBanner(
+            text = frame.reason,
+            subtitle = secondaryTip,
+        )
         frame.directorCue != null -> GuidanceBanner("${frame.directorCue.category.badge} · ${frame.directorCue.tip}")
-        frame.reason != null -> GuidanceBanner(frame.reason)
-        lightTipPinned && frame.lightGuidance != null -> GuidanceBanner(frame.lightGuidance.tip)
-        filterReason != null -> GuidanceBanner(filterReason, subtle = true)
-        frame.lightGuidance?.isActionable == true && proactivityMode != ProactivityMode.QUIET ->
-            GuidanceBanner(frame.lightGuidance.tip, subtle = true)
         proactivityMode == ProactivityMode.QUIET -> null
         else -> null
     }
@@ -1156,7 +1158,7 @@ private fun ViewfinderGuidancePill(banner: GuidanceBanner) {
     }
     val dotColor = if (banner.ready) LumiColors.Emerald else LumiColors.Ivory
     Surface(
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(20.dp),
         color = LumiColors.GlassDark,
         border = BorderStroke(1.dp, borderColor),
     ) {
@@ -1182,13 +1184,25 @@ private fun ViewfinderGuidancePill(banner: GuidanceBanner) {
                     )
                 }
             }
-            Text(
-                text = banner.text,
-                color = LumiColors.TextPrimary,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(
+                    text = banner.text,
+                    color = LumiColors.TextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                banner.subtitle?.let { sub ->
+                    Text(
+                        text = sub,
+                        color = LumiColors.Ivory.copy(alpha = 0.88f),
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
     }
 }
@@ -1384,7 +1398,7 @@ private fun LastPhotoThumbSlot(review: PostShotReview?, onClick: () -> Unit) {
         return
     }
     val context = LocalContext.current
-    val thumb by produceState<android.graphics.Bitmap?>(null, review.photoUri) {
+    val thumb by produceState<android.graphics.Bitmap?>(null, review.photoUri, review.capturedAtMs) {
         value = withContext(Dispatchers.IO) {
             PostShotRecrop.loadPreviewBitmap(context, review.photoUri, maxEdge = 160)
         }

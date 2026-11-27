@@ -108,4 +108,18 @@ class S8LightFinderTest {
         assertEquals(LightPosition.FRONT, front.position)
         assertFalse(front.isActionable)
     }
+
+    @Test
+    fun `stabilizer suppresses transient flicker and commits only after hold duration`() {
+        val stabilizer = LightGuidanceStabilizer(holdNs = 1_500_000_000L)
+        val even = LightGuidance(LightPosition.EVEN, null, "光比均匀", false)
+        val backlit = LightGuidance(LightPosition.BACKLIT, null, "强逆光", true)
+
+        assertEquals(LightPosition.EVEN, stabilizer.update(even, 0L)?.position)
+        // Brief spike for 800ms should not flicker
+        assertEquals(LightPosition.EVEN, stabilizer.update(backlit, 200_000_000L)?.position)
+        assertEquals(LightPosition.EVEN, stabilizer.update(backlit, 1_000_000_000L)?.position)
+        // Sustained past 1500ms switches cleanly
+        assertEquals(LightPosition.BACKLIT, stabilizer.update(backlit, 1_800_000_000L)?.position)
+    }
 }

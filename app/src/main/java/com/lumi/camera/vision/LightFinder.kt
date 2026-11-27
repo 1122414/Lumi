@@ -119,3 +119,42 @@ internal object LightFinder {
         )
     }
 }
+
+internal class LightGuidanceStabilizer(
+    private val holdNs: Long = 1_500_000_000L,
+) {
+    private var stable: LightGuidance? = null
+    private var pendingPosition: LightPosition? = null
+    private var pendingSinceNs: Long = 0L
+
+    fun update(candidate: LightGuidance?, nowNs: Long): LightGuidance? {
+        if (candidate == null) return stable
+        val current = stable
+        if (current == null) {
+            stable = candidate
+            pendingPosition = null
+            return stable
+        }
+        if (candidate.position == current.position) {
+            stable = candidate
+            pendingPosition = null
+            return stable
+        }
+        if (pendingPosition != candidate.position) {
+            pendingPosition = candidate.position
+            pendingSinceNs = nowNs
+            return current
+        }
+        if (nowNs - pendingSinceNs >= holdNs) {
+            stable = candidate
+            pendingPosition = null
+        }
+        return stable
+    }
+
+    fun reset() {
+        stable = null
+        pendingPosition = null
+        pendingSinceNs = 0L
+    }
+}

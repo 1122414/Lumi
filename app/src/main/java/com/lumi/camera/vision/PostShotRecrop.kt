@@ -251,12 +251,14 @@ internal object PostShotRecrop {
     fun loadPreviewBitmap(context: Context, uri: Uri, maxEdge: Int = 1080): Bitmap? {
         val resolver = context.contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
+        val boundsStream = runCatching { resolver.openInputStream(uri) }.getOrNull() ?: return null
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         var sample = 1
         while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxEdge) sample *= 2
         val decode = BitmapFactory.Options().apply { inSampleSize = sample }
-        val raw = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decode) } ?: return null
+        val decodeStream = runCatching { resolver.openInputStream(uri) }.getOrNull() ?: return null
+        val raw = decodeStream.use { BitmapFactory.decodeStream(it, null, decode) } ?: return null
         return applyExifOrientation(context, uri, raw)
     }
 
