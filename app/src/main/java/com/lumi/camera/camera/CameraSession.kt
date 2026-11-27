@@ -81,6 +81,8 @@ import com.lumi.camera.shotplan.SubjectCandidate
 import com.lumi.camera.shotplan.VisionChat
 import com.lumi.camera.ui.ExposureUiState
 import com.lumi.camera.ui.ReferenceUiState
+import com.lumi.camera.vision.CloseupFraming
+import com.lumi.camera.vision.CloseupProposal
 import com.lumi.camera.vision.CompositionAnalyzer
 import com.lumi.camera.vision.OutlineAttempt
 import com.lumi.camera.vision.PostShotRecrop
@@ -104,6 +106,16 @@ internal data class CandidateOverlay(
     val userPicked: Boolean = false,
 )
 
+internal data class CloseupOverlay(
+    val id: String,
+    val label: String,
+    val targetZoom: Float,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+)
+
 internal data class Viewfinder(
     val canRemember: Boolean = false,
     val hasTarget: Boolean = false,
@@ -116,6 +128,7 @@ internal data class Viewfinder(
     val rollDeg: Double? = null,
     val suggestedZoom: Float? = null,
     val candidates: List<CandidateOverlay> = emptyList(),
+    val closeups: List<CloseupOverlay> = emptyList(),
     val tapPoint: Point? = null,
     val viewpointDrifted: Boolean = false,
     val directorCue: DirectorCue? = null,
@@ -208,6 +221,8 @@ internal class CameraSession(
     private var pendingCandidates: List<SubjectCandidate> = emptyList()
     private var pendingCandidateGeometry: FrameGeometry? = null
     private var pendingTapPreview: Point? = null
+    private var latestCloseups: List<CloseupProposal> = emptyList()
+    private var latestCloseupFrame: SceneFrame? = null
     private var latest: SceneFrame? = null
     private var latestLens: Lens? = null
     private var latestLensZoom = 1f
@@ -645,12 +660,51 @@ internal class CameraSession(
                 }
             }
         }.orEmpty()
+        val closeupOverlays = if (fresh != null &&
+            active == null &&
+            requests.active == null &&
+            proactivityMode != ProactivityMode.QUIET &&
+            lensFacing == CameraSelector.LENS_FACING_BACK &&
+            !zoom.changing &&
+            zoom.max > zoom.ratio + 0.45f) {
+            val proposals = CloseupFraming.generate(
+                faces = fresh.faces,
+                subjectBounds = fresh.box,
+                currentZoom = zoom.ratio,
+                zoomStops = zoom.keyRatios,
+                maxZoom = zoom.max,
+            )
+            latestCloseups = proposals
+            latestCloseupFrame = if (proposals.isNotEmpty()) fresh else null
+            if (proposals.isEmpty()) emptyList() else {
+                val refSize = fresh.geometry.referenceSize
+                val map = FrameMapping(fresh.geometry, size)
+                proposals.map { p ->
+                    val tl = map.referenceToPreview(Point((p.box.left * refSize.width).toFloat(), (p.box.top * refSize.height).toFloat()))
+                    val br = map.referenceToPreview(Point((p.box.right * refSize.width).toFloat(), (p.box.bottom * refSize.height).toFloat()))
+                    CloseupOverlay(
+                        id = p.id,
+                        label = p.chipLabel,
+                        targetZoom = p.targetZoom,
+                        left = minOf(tl.x, br.x),
+                        top = minOf(tl.y, br.y),
+                        right = maxOf(tl.x, br.x),
+                        bottom = maxOf(tl.y, br.y),
+                    )
+                }
+            }
+        } else {
+            latestCloseups = emptyList()
+            latestCloseupFrame = null
+            emptyList()
+        }
         val geometry = active?.target?.geometry ?: identified?.geometry
         if (geometry == null) {
             onFrame(Viewfinder(
                 canRemember = current != null,
                 rollDeg = rollDeg,
                 candidates = candidateOverlays,
+                closeups = closeupOverlays,
                 tapPoint = pendingTapPreview,
             ))
             return
@@ -1197,6 +1251,26 @@ internal class CameraSession(
         if (targetZoom in zoom.min..zoom.max) setZoom(targetZoom)
     }
 
+    fun selectCloseupProposal(proposalId: String) {
+        val proposal = latestCloseups.firstOrNull { it.id == proposalId } ?: return
+        val sourceFrame = latestCloseupFrame ?: latest ?: return
+        val target = RememberedComposition.closeup(sourceFrame, proposal.aimUv, proposal.targetZoom) ?: return
+        cancelRecommendation()
+        selection = null
+        latestShift = null
+        latestStepProgress = null
+        trackerLostSinceNs = null
+        subjectLostNotified = false
+        observer?.apply { watchPerson = false; tracker = null; stepTracker = null }
+        val targetZoom = proposal.targetZoom.coerceIn(zoom.min, zoom.max)
+        onRecommendationStatus(null)
+        startGuide(target, "${proposal.kind.label} · 对准框中心")
+        if (abs(zoom.ratio - targetZoom) > 0.1f) {
+            setZoom(targetZoom)
+        }
+        onMessage("已切至 ${proposal.chipLabel}，将白点对准绿环拍摄")
+    }
+
     fun recommend() = recommend(null, null, null)
 
     private fun recommend(tapUv: Uv?, tapPreview: Point?, statusOverride: String? = null) {
@@ -1548,6 +1622,7 @@ internal class CameraSession(
         val captureZoom = zoom.ratio
         val captureLuma = latest?.meanLuma
         val captureClutter = latest?.backgroundClutter
+        val captureFaceBox = latest?.faces?.maxByOrNull { (it.right - it.left) * (it.bottom - it.top) }
         val captureUnresolvedStep = run?.target?.stepDirection != null && latestStepProgress?.satisfied != true
         val activeGrade = filterState.resolvedGrade
         val frontMirror = lensFacing == CameraSelector.LENS_FACING_FRONT
@@ -1568,6 +1643,7 @@ internal class CameraSession(
                     zoomRatio = captureZoom,
                     backgroundClutter = captureClutter,
                     unresolvedStep = captureUnresolvedStep,
+                    faceBox = captureFaceBox,
                 )
                 onCaptured(review)
             } else {

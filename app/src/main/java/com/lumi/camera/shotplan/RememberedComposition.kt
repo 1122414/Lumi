@@ -204,6 +204,19 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
             return RememberedComposition(frame.geometry, observation, observation, emptyList())
         }
 
+        fun closeup(frame: SceneFrame, aimUv: Uv, targetZoom: Float): RememberedComposition? {
+            val source = frame.observation ?: return null
+            val targetPose = source.pose * (source.lens.lookAt(aimUv) * source.lens.lookAt(Uv.CENTER).inverse())
+            val targetObs = source.copy(pose = targetPose)
+            return RememberedComposition(
+                geometry = frame.geometry,
+                observation = targetObs,
+                backgroundSource = source,
+                marks = emptyList(),
+                suggestedZoom = targetZoom,
+            )
+        }
+
         fun recommended(
             frame: SceneFrame,
             recommendation: Recommendation,

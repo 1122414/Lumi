@@ -100,6 +100,7 @@ import com.lumi.camera.BuildConfig
 import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.CandidateOverlay
+import com.lumi.camera.camera.CloseupOverlay
 import com.lumi.camera.camera.ExposureControlMode
 import com.lumi.camera.camera.ExposureSolver
 import com.lumi.camera.camera.LiveTelemetry
@@ -633,6 +634,7 @@ private fun ColumnScope.CameraScreen(
                     },
             ) {
                 drawCompositionGuides(presetSelection, showGrid)
+                drawCloseupFrames(frame.closeups)
                 drawCandidateBrackets(frame.candidates)
                 frame.tapPoint?.let { tap -> drawTapReticle(tap) }
                 val points = frame.outline
@@ -787,6 +789,33 @@ private fun ColumnScope.CameraScreen(
                             fontWeight = FontWeight.Medium,
                             maxLines = 1,
                         )
+                    }
+                }
+            }
+
+            if (frame.closeups.isNotEmpty() && !reviewBannerVisible) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 66.dp, start = 16.dp, end = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    frame.closeups.forEach { proposal ->
+                        Surface(
+                            onClick = { session.selectCloseupProposal(proposal.id) },
+                            shape = RoundedCornerShape(16.dp),
+                            color = LumiColors.GlassDark,
+                            border = BorderStroke(1.dp, LumiColors.Ivory.copy(alpha = 0.72f)),
+                        ) {
+                            Text(
+                                text = proposal.label,
+                                color = LumiColors.Ivory,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -1435,6 +1464,38 @@ private fun DrawScope.drawHorizonLevel(mid: Offset, rollDeg: Double) {
         stroke,
         cap = StrokeCap.Round,
     )
+}
+
+private fun DrawScope.drawCloseupFrames(closeups: List<CloseupOverlay>) {
+    if (closeups.isEmpty()) return
+    val dash = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 5.dp.toPx()))
+    val thin = 1.dp.toPx()
+    val cornerStroke = 1.8.dp.toPx()
+    closeups.forEachIndexed { idx, box ->
+        val alpha = if (idx == 0) 0.78f else 0.48f
+        val color = LumiColors.Ivory.copy(alpha = alpha)
+        val w = (box.right - box.left).coerceAtLeast(1f)
+        val h = (box.bottom - box.top).coerceAtLeast(1f)
+        drawRect(
+            color = color.copy(alpha = alpha * 0.55f),
+            topLeft = Offset(box.left, box.top),
+            size = Size(w, h),
+            style = Stroke(width = thin, pathEffect = dash),
+        )
+        val corner = minOf(12.dp.toPx(), w * 0.22f, h * 0.22f)
+        drawLine(color, Offset(box.left, box.top), Offset(box.left + corner, box.top), cornerStroke, cap = StrokeCap.Round)
+        drawLine(color, Offset(box.left, box.top), Offset(box.left, box.top + corner), cornerStroke, cap = StrokeCap.Round)
+        drawLine(color, Offset(box.right, box.top), Offset(box.right - corner, box.top), cornerStroke, cap = StrokeCap.Round)
+        drawLine(color, Offset(box.right, box.top), Offset(box.right, box.top + corner), cornerStroke, cap = StrokeCap.Round)
+        drawLine(color, Offset(box.left, box.bottom), Offset(box.left + corner, box.bottom), cornerStroke, cap = StrokeCap.Round)
+        drawLine(color, Offset(box.left, box.bottom), Offset(box.left, box.bottom - corner), cornerStroke, cap = StrokeCap.Round)
+        drawLine(color, Offset(box.right, box.bottom), Offset(box.right - corner, box.bottom), cornerStroke, cap = StrokeCap.Round)
+        drawLine(color, Offset(box.right, box.bottom), Offset(box.right, box.bottom - corner), cornerStroke, cap = StrokeCap.Round)
+        // Tiny center aim dot inside primary close-up frame
+        if (idx == 0) {
+            drawCircle(color, 2.2.dp.toPx(), Offset((box.left + box.right) * 0.5f, (box.top + box.bottom) * 0.5f))
+        }
+    }
 }
 
 private fun DrawScope.drawCandidateBrackets(candidates: List<CandidateOverlay>) {

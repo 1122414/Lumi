@@ -59,9 +59,10 @@ internal object PostShotRecrop {
         zoomRatio: Float = 1f,
         backgroundClutter: Double? = null,
         unresolvedStep: Boolean = false,
+        faceBox: FaceBox? = null,
     ): PostShotReview {
         val summary = reviewSummary(subjectBounds, rollDeg, wasReady, reason, directorCue)
-        val proposals = generateProposals(subjectBounds)
+        val proposals = generateProposals(subjectBounds, faceBox)
         val quality = PhotoQualityEvaluator.evaluate(
             subjectBounds = subjectBounds,
             rollDeg = rollDeg,
@@ -99,14 +100,58 @@ internal object PostShotRecrop {
         }
     }
 
-    internal fun generateProposals(subjectBounds: FaceBox?): List<RecropProposal> {
-        val box = subjectBounds ?: FaceBox(0.32, 0.24, 0.68, 0.78)
+    internal fun generateProposals(subjectBounds: FaceBox?, faceBox: FaceBox? = null): List<RecropProposal> {
+        val box = subjectBounds ?: faceBox ?: FaceBox(0.32, 0.24, 0.68, 0.78)
         val cx = ((box.left + box.right) / 2.0).toFloat().coerceIn(0.10f, 0.90f)
         val cy = ((box.top + box.bottom) / 2.0).toFloat().coerceIn(0.12f, 0.88f)
         val sw = (box.right - box.left).toFloat().coerceIn(0.08f, 0.90f)
         val sh = (box.bottom - box.top).toFloat().coerceIn(0.10f, 0.90f)
 
         val candidates = mutableListOf<RecropProposal>()
+
+        // Portrait close-up proposals when a face is detected in a panoramic/full-body shot.
+        if (faceBox != null) {
+            val fw = (faceBox.right - faceBox.left).toFloat().coerceIn(0.04f, 0.90f)
+            val fh = (faceBox.bottom - faceBox.top).toFloat().coerceIn(0.04f, 0.90f)
+            val fcx = ((faceBox.left + faceBox.right) / 2.0).toFloat()
+            val fcy = ((faceBox.top + faceBox.bottom) / 2.0).toFloat()
+            if (fw <= 0.30f && fh <= 0.32f) {
+                val halfSize = max(fw * 3.1f, fh * 2.7f).coerceIn(0.42f, 0.66f)
+                val halfCrop = fitCropContainingSubject(
+                    desiredCenterX = fcx,
+                    desiredCenterY = (fcy + fh * 0.72f).coerceIn(0.18f, 0.85f),
+                    cropW = halfSize,
+                    cropH = halfSize,
+                    box = faceBox,
+                )
+                if (!halfCrop.isNearFullFrame()) {
+                    candidates += RecropProposal(
+                        id = "half_body_closeup",
+                        title = "半身特写",
+                        subtitle = "从全景裁出人物半身，更有故事感",
+                        crop = halfCrop,
+                    )
+                }
+            }
+            if (fw <= 0.24f && fh <= 0.26f) {
+                val faceSize = max(fw * 2.1f, fh * 1.9f).coerceIn(0.35f, 0.48f)
+                val faceCrop = fitCropContainingSubject(
+                    desiredCenterX = fcx,
+                    desiredCenterY = (fcy + fh * 0.12f).coerceIn(0.14f, 0.86f),
+                    cropW = faceSize,
+                    cropH = faceSize,
+                    box = faceBox,
+                )
+                if (!faceCrop.isNearFullFrame() && candidates.none { !faceCrop.isMeaningfullyDifferentFrom(it.crop) }) {
+                    candidates += RecropProposal(
+                        id = "face_closeup",
+                        title = "脸部特写",
+                        subtitle = "聚焦神态与面部光影细节",
+                        crop = faceCrop,
+                    )
+                }
+            }
+        }
 
         // Proposal 1: Rule-of-thirds balance (places subject onto left-third or right-third with clean headroom).
         val targetThirdX = if (cx <= 0.5f) 0.36f else 0.64f
@@ -166,7 +211,7 @@ internal object PostShotRecrop {
             }
         }
 
-        return candidates.take(2)
+        return candidates.take(3)
     }
 
     private fun fitCropContainingSubject(
