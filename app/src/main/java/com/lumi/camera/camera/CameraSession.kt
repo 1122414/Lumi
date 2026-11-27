@@ -23,6 +23,7 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.core.UseCaseGroup
@@ -38,6 +39,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
 import com.lumi.camera.BuildConfig
+import com.lumi.camera.filter.AiFilterSuggestion
+import com.lumi.camera.filter.FilterAdjuster
+import com.lumi.camera.filter.FilterPreset
+import com.lumi.camera.filter.FilterSelectionMode
+import com.lumi.camera.filter.FilterUiState
+import com.lumi.camera.filter.PhotoFilterRenderer
+import com.lumi.camera.filter.PreviewFilterEffect
 import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.guidance.Lens
 import com.lumi.camera.guidance.Observation
@@ -136,9 +144,14 @@ internal class CameraSession(
     private val onExposure: (ExposureUiState) -> Unit = {},
     private val onReference: (ReferenceUiState) -> Unit = {},
     private val onNativeProcessing: (NativeProcessingUiState) -> Unit = {},
+    private val onFilter: (FilterUiState) -> Unit = {},
     initialProactivity: ProactivityMode = ProactivityMode.MANUAL,
     initialExposureMode: ExposureControlMode = ExposureControlMode.AUTO,
     initialNativeProcessing: NativeProcessingMode = NativeProcessingMode.NATIVE_AI,
+    initialFilterMode: FilterSelectionMode = FilterSelectionMode.MANUAL,
+    initialFilterPreset: FilterPreset = FilterPreset.ORIGINAL,
+    initialFilterIntensity: Float = FilterAdjuster.DEFAULT_INTENSITY,
+    initialFilterAiAdaptive: Boolean = true,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
     private data class Binding(
         val size: Extent,
@@ -208,6 +221,18 @@ internal class CameraSession(
     private var nativeProcessingMode = initialNativeProcessing
     private var nativeCapability = NativeProcessingCapability()
     private var extensionsManager: ExtensionsManager? = null
+    private var filterMode = initialFilterMode
+    private var filterPreset = initialFilterPreset
+    private var filterIntensity = initialFilterIntensity.coerceIn(0f, 1f)
+    private var filterAiAdaptive = initialFilterAiAdaptive
+    private var aiFilterSuggestion: AiFilterSuggestion? = null
+    private var filterState = FilterUiState(
+        mode = filterMode,
+        selectedPreset = filterPreset,
+        intensity = filterIntensity,
+        aiAdaptiveEnabled = filterAiAdaptive,
+    )
+    private var previewFilterEffect: PreviewFilterEffect? = null
     private var exposureMode = initialExposureMode
     private var manualExposure = ManualExposureSettings()
     private var pendingAiExposure: AiExposureSuggestion? = null
@@ -319,6 +344,46 @@ internal class CameraSession(
         )
     }
 
+    private fun refreshFilterState() {
+        val next = FilterAdjuster.resolve(
+            mode = filterMode,
+            selectedPreset = filterPreset,
+            intensity = filterIntensity,
+            aiAdaptiveEnabled = filterAiAdaptive,
+            aiSuggestion = aiFilterSuggestion,
+            telemetry = currentTelemetry(),
+        )
+        filterState = next
+        previewFilterEffect?.updateGrade(next.resolvedGrade)
+        onFilter(next)
+    }
+
+    fun selectAiSmartFilter() {
+        filterMode = FilterSelectionMode.AI_SMART
+        if (filterIntensity <= 0.05f) filterIntensity = FilterAdjuster.DEFAULT_INTENSITY
+        refreshFilterState()
+    }
+
+    fun selectFilterPreset(preset: FilterPreset) {
+        filterMode = FilterSelectionMode.MANUAL
+        filterPreset = preset
+        if (preset != FilterPreset.ORIGINAL && filterIntensity <= 0.05f) {
+            filterIntensity = FilterAdjuster.DEFAULT_INTENSITY
+        }
+        refreshFilterState()
+    }
+
+    fun setFilterIntensity(intensity: Float) {
+        filterIntensity = intensity.coerceIn(0f, 1f)
+        refreshFilterState()
+    }
+
+    fun setFilterAiAdaptive(enabled: Boolean) {
+        if (filterAiAdaptive == enabled) return
+        filterAiAdaptive = enabled
+        refreshFilterState()
+    }
+
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun bind() {
         val p = provider ?: return
@@ -360,8 +425,14 @@ internal class CameraSession(
             .setCaptureMode(captureMode)
             .build()
         preview.setSurfaceProvider(view.surfaceProvider)
+        val filterEffect = PreviewFilterEffect().also {
+            it.updateGrade(filterState.resolvedGrade)
+        }
+        previewFilterEffect = filterEffect
         val group = UseCaseGroup.Builder().setViewPort(viewport)
-            .addUseCase(preview).addUseCase(analysis).addUseCase(photo).build()
+            .addUseCase(preview).addUseCase(analysis).addUseCase(photo)
+            .addEffect(filterEffect.cameraEffect)
+            .build()
         uses = arrayOf(preview, analysis, photo)
         try {
             var actualExtensionMode = initialPlan.extensionMode
@@ -407,6 +478,7 @@ internal class CameraSession(
             applyExposureToHardware()
             publishExposureState()
             publishNativeProcessingState()
+            refreshFilterState()
             val lensStops = rearZoomStops(context, camera.cameraInfo)
             val ranges = Observer<ZoomState> { range ->
                 if (this.camera === camera && (zoom.min != range.minZoomRatio || zoom.max != range.maxZoomRatio)) {
@@ -532,6 +604,7 @@ internal class CameraSession(
         if (now - lastTelemetryPushNs >= 250_000_000L) {
             lastTelemetryPushNs = now
             publishExposureState()
+            refreshFilterState()
         }
         render()
         if (proactivityMode == ProactivityMode.PROACTIVE &&
@@ -1467,6 +1540,70 @@ internal class CameraSession(
         val captureLuma = latest?.meanLuma
         val captureClutter = latest?.backgroundClutter
         val captureUnresolvedStep = run?.target?.stepDirection != null && latestStepProgress?.satisfied != true
+        val activeGrade = filterState.resolvedGrade
+        val frontMirror = lensFacing == CameraSelector.LENS_FACING_FRONT
+
+        fun finishSaved(uri: Uri?) {
+            if (disposed) return
+            proactiveTrigger.onManualOrCaptured(SystemClock.elapsedRealtimeNanos(), capturePose)
+            aestheticPrefs.recordComposition(captureChoice, captureZoom)
+            if (uri != null) {
+                val review = PostShotRecrop.buildReview(
+                    photoUri = uri,
+                    subjectBounds = captureBounds,
+                    rollDeg = captureRoll,
+                    wasReady = captureReady,
+                    reason = captureReason,
+                    directorCue = captureCue,
+                    meanLuma = captureLuma,
+                    zoomRatio = captureZoom,
+                    backgroundClutter = captureClutter,
+                    unresolvedStep = captureUnresolvedStep,
+                )
+                onCaptured(review)
+            } else {
+                onMessage("照片已保存到系统相册。")
+            }
+        }
+
+        if (!activeGrade.isIdentity) {
+            photo.takePicture(worker, object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    val rotationDeg = image.imageInfo.rotationDegrees
+                    val bytes = try {
+                        val buffer = image.planes[0].buffer
+                        ByteArray(buffer.remaining()).also { buffer.get(it) }
+                    } finally {
+                        image.close()
+                    }
+                    val savedUri = runCatching {
+                        PhotoFilterRenderer.saveFilteredJpeg(
+                            context = context,
+                            jpegBytes = bytes,
+                            grade = activeGrade,
+                            mirrorHorizontal = frontMirror,
+                            fallbackRotationDegrees = rotationDeg,
+                        )
+                    }.getOrNull()
+                    main.execute {
+                        if (savedUri != null) {
+                            finishSaved(savedUri)
+                        } else if (!disposed) {
+                            onMessage("保存失败，请检查相册权限和存储空间。")
+                        }
+                    }
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    Log.w("LumiCamera", "Filtered capture failed", exception)
+                    main.execute {
+                        if (!disposed) onMessage("保存失败，请检查相册权限和存储空间。")
+                    }
+                }
+            })
+            return
+        }
+
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "Lumi_${System.currentTimeMillis()}.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -1475,7 +1612,7 @@ internal class CameraSession(
             }
         }
         val metadata = ImageCapture.Metadata().apply {
-            isReversedHorizontal = lensFacing == CameraSelector.LENS_FACING_FRONT
+            isReversedHorizontal = frontMirror
         }
         val output = ImageCapture.OutputFileOptions.Builder(context.contentResolver,
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
@@ -1483,27 +1620,7 @@ internal class CameraSession(
             .build()
         photo.takePicture(output, main, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                if (disposed) return
-                proactiveTrigger.onManualOrCaptured(SystemClock.elapsedRealtimeNanos(), capturePose)
-                aestheticPrefs.recordComposition(captureChoice, captureZoom)
-                val uri = result.savedUri
-                if (uri != null) {
-                    val review = PostShotRecrop.buildReview(
-                        photoUri = uri,
-                        subjectBounds = captureBounds,
-                        rollDeg = captureRoll,
-                        wasReady = captureReady,
-                        reason = captureReason,
-                        directorCue = captureCue,
-                        meanLuma = captureLuma,
-                        zoomRatio = captureZoom,
-                        backgroundClutter = captureClutter,
-                        unresolvedStep = captureUnresolvedStep,
-                    )
-                    onCaptured(review)
-                } else {
-                    onMessage("照片已保存到系统相册。")
-                }
+                finishSaved(result.savedUri)
             }
             override fun onError(exception: ImageCaptureException) {
                 Log.w("LumiCamera", "Save failed", exception)
@@ -1546,6 +1663,8 @@ internal class CameraSession(
         handler.removeCallbacks(expire)
         uses.filterIsInstance<ImageAnalysis>().forEach { it.clearAnalyzer() }
         if (uses.isNotEmpty()) provider?.unbind(*uses)
+        previewFilterEffect?.release()
+        previewFilterEffect = null
         observer?.let { worker.execute(it::close) }
         observer = null
         uses = emptyArray()
