@@ -269,6 +269,12 @@ internal class SubjectOutline private constructor(private val source: Observatio
             return OutlineAttempt(null, lastReason)
         }
 
+        fun instantBox(
+            source: Observation,
+            selected: SelectedSubject,
+            image: SubjectPixels,
+        ): SubjectOutline? = boxFallback(source, selected, image) { _, _ -> null }?.outline
+
         private fun boxFallback(
             source: Observation,
             selected: SelectedSubject,

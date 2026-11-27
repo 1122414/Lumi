@@ -42,7 +42,11 @@ internal enum class CompositionChoice(val wireName: String, val label: String) {
     RIGHT_THIRD("right_third", "主体放右三分"),
     TIGHT_TOP("tight_top", "减少顶部留白"),
     MORE_HEADROOM("more_headroom", "增加顶部留白"),
-    PULL_IN("pull_in", "拉回安全区");
+    PULL_IN("pull_in", "拉回安全区"),
+    LOWER_THIRD("lower_third", "低三分显天空"),
+    GROUP_BALANCE("group_balance", "合影重心平衡"),
+    SCENIC_PORTRAIT("scenic_portrait", "人小景大留白"),
+    LEADING_FRAME("leading_frame", "对称线条聚焦");
 
     companion object {
         fun parse(raw: Any?): CompositionChoice? {
@@ -112,6 +116,26 @@ internal enum class CompositionChoice(val wireName: String, val label: String) {
                     desiredX = clampX(pulledX)
                     desiredY = clampY(pulledY)
                 }
+                LOWER_THIRD -> {
+                    desiredX = clampX(cx.coerceIn(0.36, 0.64))
+                    desiredY = clampY(0.66)
+                }
+                GROUP_BALANCE -> {
+                    // Balance multi-person group horizontally around center with clean portrait headroom
+                    val targetTop = box.top.coerceIn(0.16, 0.24)
+                    desiredX = clampX(0.50)
+                    desiredY = clampY(targetTop + h / 2.0)
+                }
+                SCENIC_PORTRAIT -> {
+                    // Place person cleanly on lower-left or lower-right third so sky/scenery dominates
+                    val targetX = if (cx <= 0.50) 0.36 else 0.64
+                    desiredX = clampX(targetX)
+                    desiredY = clampY(0.64)
+                }
+                LEADING_FRAME -> {
+                    desiredX = clampX(0.50)
+                    desiredY = clampY(cy.coerceIn(0.42, 0.58))
+                }
             }
 
             // To move subject from (cx, cy) to (desiredX, desiredY), aim camera at 0.5 + (current - desired).
@@ -133,9 +157,12 @@ internal enum class CompositionChoice(val wireName: String, val label: String) {
             fun clampX(x: Double) = x.coerceIn(minOf(minCx, maxCx), maxOf(minCx, maxCx))
             fun clampY(y: Double) = y.coerceIn(minOf(minCy, maxCy), maxOf(minCy, maxCy))
             return when (choice) {
-                CENTER -> Uv(clampX(0.50), clampY(0.50))
+                CENTER, LEADING_FRAME -> Uv(clampX(0.50), clampY(0.50))
                 LEFT_THIRD -> Uv(clampX(0.36), clampY(desired0.y))
                 RIGHT_THIRD -> Uv(clampX(0.64), clampY(desired0.y))
+                LOWER_THIRD -> Uv(clampX(desired0.x.coerceIn(0.36, 0.64)), clampY(0.66))
+                GROUP_BALANCE -> Uv(clampX(0.50), clampY(desired0.y))
+                SCENIC_PORTRAIT -> Uv(clampX(if (desired0.x <= 0.50) 0.36 else 0.64), clampY(0.64))
                 TIGHT_TOP, MORE_HEADROOM -> {
                     val targetTop = desired0.y - captureHeight.coerceIn(0.01, 1.0) / 2.0
                     Uv(clampX(desired0.x.coerceIn(0.34, 0.66)), clampY(targetTop + h / 2.0))

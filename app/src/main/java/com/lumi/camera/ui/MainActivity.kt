@@ -300,6 +300,7 @@ private fun ColumnScope.CameraScreen(
     var quickControlsOpen by remember { mutableStateOf(false) }
     var activeTray by remember { mutableStateOf(BottomTray.NONE) }
     var showGrid by remember { mutableStateOf(uiPrefs.getBoolean("show_grid", true)) }
+    var showPoseSilhouette by remember { mutableStateOf(uiPrefs.getBoolean("show_pose_silhouette", true)) }
 
     var proactivityMode by remember {
         mutableStateOf(ProactivityMode.fromWire(uiPrefs.getString("proactivity_mode", null)))
@@ -896,6 +897,9 @@ private fun ColumnScope.CameraScreen(
             ) {
                 drawAspectRatioMask(controlsState.aspectRatio)
                 drawCompositionGuides(presetSelection, showGrid)
+                if (showPoseSilhouette) {
+                    frame.poseSilhouette?.let { drawPoseSilhouette(it) }
+                }
                 drawCloseupFrames(frame.closeups)
                 drawCandidateBrackets(frame.candidates)
                 frame.tapPoint?.let { tap -> drawTapReticle(tap) }
@@ -1061,6 +1065,21 @@ private fun ColumnScope.CameraScreen(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(end = 10.dp, top = 10.dp),
+                )
+            }
+
+            val activePose = frame.poseSilhouette
+            if (activePose != null && !reviewBannerVisible) {
+                PoseSilhouetteToggleChip(
+                    silhouette = activePose,
+                    visible = showPoseSilhouette,
+                    onToggle = {
+                        showPoseSilhouette = !showPoseSilhouette
+                        uiPrefs.edit().putBoolean("show_pose_silhouette", showPoseSilhouette).apply()
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 12.dp, bottom = 58.dp),
                 )
             }
 
@@ -1299,7 +1318,7 @@ private fun ColumnScope.CameraScreen(
             )
 
             Box(Modifier.width(86.dp), contentAlignment = Alignment.CenterEnd) {
-                val aiEnabled = bound && !zoom.changing && configured && proactivityMode != ProactivityMode.QUIET
+                val aiEnabled = bound && !zoom.changing && proactivityMode != ProactivityMode.QUIET
                 val aiBusy = recommendationStatus != null && !frame.hasTarget
                 Surface(
                     onClick = session::recommend,
@@ -1325,7 +1344,11 @@ private fun ColumnScope.CameraScreen(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            text = if (aiBusy) "分析中…" else "AI 构图",
+                            text = when {
+                                aiBusy -> "分析中…"
+                                !configured -> "离线构图"
+                                else -> "AI 构图"
+                            },
                             color = when {
                                 !aiEnabled -> LumiColors.TextMuted
                                 aiBusy -> LumiColors.Ivory
@@ -1473,6 +1496,11 @@ private fun resolveGuidanceBanner(
     }
     return when {
         !bound -> GuidanceBanner(if (front) "正在打开前置相机" else "正在打开后置相机", subtle = true)
+        recommendationStatus != null && frame.hasTarget && frame.isOfflineBaseline -> GuidanceBanner(
+            text = frame.reason ?: "端侧构图已就绪",
+            subtitle = recommendationStatus,
+            ready = frame.ready,
+        )
         recommendationStatus != null -> GuidanceBanner(recommendationStatus)
         frame.ready && autoShoot && !autoShotFired -> GuidanceBanner("构图就绪 · 自动拍摄中", ready = true)
         frame.ready && pendingStep != null -> GuidanceBanner("构图已对齐 · ${pendingStep.direction.label}更干净", ready = true)

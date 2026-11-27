@@ -41,12 +41,13 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
         referenceJpeg: ByteArray? = null,
         requestFilterAdvice: Boolean = false,
         activeFilterPreset: FilterPreset? = null,
+        sessionMemoryHint: String? = null,
     ): ModelReply {
         remainingMs()
         val payload = ChatProtocol.request(
             config.model, jpeg, preset, candidates, zoomStops, currentZoom,
             preferencePrior, telemetrySummary, requestExposureAdvice, referenceRecipe, referenceJpeg,
-            requestFilterAdvice, activeFilterPreset,
+            requestFilterAdvice, activeFilterPreset, sessionMemoryHint,
         )
         val body = postJson(payload)
         return try { ChatProtocol.response(body, candidates, zoomStops, currentZoom) } catch (_: Exception) { null }

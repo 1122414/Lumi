@@ -18,16 +18,17 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
     val choice: CompositionChoice? = null, val desiredSubjectCenter: Uv? = null,
     val originalChoice: CompositionChoice? = choice, val originalDesiredSubjectCenter: Uv? = desiredSubjectCenter,
     val suggestedZoom: Float? = null, val directorCue: DirectorCue? = null,
-    val stepDirection: StepDirection? = null, val referenceGuidance: ReferenceGuidance? = null) {
+    val stepDirection: StepDirection? = null, val referenceGuidance: ReferenceGuidance? = null,
+    val poseSilhouette: PoseSilhouette? = null, val isOfflineBaseline: Boolean = false) {
 
     fun withPreset(selection: PresetSelection, livePose: Pose, liveLens: Lens, shift: TrackedShift?): RememberedComposition {
         val trackedOutline = outline ?: return this
         if (selection.preset == CompositionPreset.AUTO) {
             val restored = RememberedComposition(geometry, observation, backgroundSource, marks, outline,
-                useOutlinePosition, originalChoice, originalDesiredSubjectCenter, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance)
+                useOutlinePosition, originalChoice, originalDesiredSubjectCenter, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance, poseSilhouette, isOfflineBaseline)
             val liveTarget = restored.targetFor(livePose, liveLens, shift)
             return RememberedComposition(geometry, liveTarget, backgroundSource, marks, outline,
-                useOutlinePosition, originalChoice, originalDesiredSubjectCenter, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance)
+                useOutlinePosition, originalChoice, originalDesiredSubjectCenter, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance, poseSilhouette, isOfflineBaseline)
         }
         val b0 = trackedOutline.bounds
         val w0 = (b0.right - b0.left).coerceIn(0.01, 1.0)
@@ -52,11 +53,12 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
             CompositionChoice.MORE_HEADROOM -> Uv(anchorDesired.x.coerceIn(0.34, 0.66), 0.24 + h0 / 2.0)
             else -> Uv(c0.x - (captureAim.x - 0.5), c0.y - (captureAim.y - 0.5))
         }
+        val nextSilhouette = PoseSilhouette.inferForPortrait(newChoice, if (trackedOutline.person) 1 else 0, trackedOutline.person)
         val updated = RememberedComposition(geometry, observation, backgroundSource, marks, outline,
-            useOutlinePosition, newChoice, newDesired0, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance)
+            useOutlinePosition, newChoice, newDesired0, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance, nextSilhouette, isOfflineBaseline)
         val liveTarget = updated.targetFor(livePose, liveLens, shift)
         return RememberedComposition(geometry, liveTarget, backgroundSource, marks, outline,
-            useOutlinePosition, newChoice, newDesired0, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance)
+            useOutlinePosition, newChoice, newDesired0, originalChoice, originalDesiredSubjectCenter, suggestedZoom, directorCue, stepDirection, referenceGuidance, nextSilhouette, isOfflineBaseline)
     }
 
     fun predictedSubjectCenter(livePose: Pose, liveLens: Lens, shift: TrackedShift?): Uv? {
@@ -287,7 +289,9 @@ internal class RememberedComposition private constructor(val geometry: FrameGeom
                 outline, useOutlinePosition = !selected.person, choice = effectivePlan.choice,
                 desiredSubjectCenter = desired0, suggestedZoom = effectivePlan.suggestedZoom,
                 directorCue = effectivePlan.directorCue, stepDirection = effectivePlan.stepDirection,
-                referenceGuidance = effectivePlan.referenceGuidance))
+                referenceGuidance = effectivePlan.referenceGuidance,
+                poseSilhouette = effectivePlan.poseSilhouette,
+                isOfflineBaseline = effectivePlan.isOfflineBaseline))
         }
     }
 }

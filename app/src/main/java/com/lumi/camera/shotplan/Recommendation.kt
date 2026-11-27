@@ -39,11 +39,13 @@ internal class Recommendation private constructor(
     val exposureSuggestion: AiExposureSuggestion? = null,
     val referenceGuidance: ReferenceGuidance? = null,
     val filterSuggestion: AiFilterSuggestion? = null,
+    val poseSilhouette: PoseSilhouette? = null,
+    val isOfflineBaseline: Boolean = false,
 ) {
     fun withMeasuredBounds(bounds: FaceBox): Recommendation {
         val selectedChoice = choice ?: return this
         val computed = CompositionChoice.aimPointFor(bounds, selectedChoice)
-        return Recommendation(computed, confidence, computed == Uv.CENTER, reason, subject, selectedChoice, suggestedZoom, candidateId, directorCue, stepDirection, exposureSuggestion, referenceGuidance, filterSuggestion)
+        return Recommendation(computed, confidence, computed == Uv.CENTER, reason, subject, selectedChoice, suggestedZoom, candidateId, directorCue, stepDirection, exposureSuggestion, referenceGuidance, filterSuggestion, poseSilhouette, isOfflineBaseline)
     }
 
     val caption: String = run {
@@ -70,8 +72,29 @@ internal class Recommendation private constructor(
         private val jsonToken = java.util.regex.Pattern.compile(
             """[ \t\r\n]+|[{}\[\],:]|true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|(?:"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")""")
 
-        private val candidateAllowedKeys = setOf("candidate", "choice", "reason", "name", "zoom", "confidence", "focus", "tip", "step", "exposure", "pose_cue", "beyond_tip", "filter")
-        private val choiceAllowedKeys = setOf("subject", "choice", "confidence", "reason", "zoom", "focus", "tip", "step", "exposure", "pose_cue", "beyond_tip", "filter")
+        private val candidateAllowedKeys = setOf("candidate", "choice", "reason", "name", "zoom", "confidence", "focus", "tip", "step", "exposure", "pose_cue", "beyond_tip", "filter", "pose_silhouette")
+        private val choiceAllowedKeys = setOf("subject", "choice", "confidence", "reason", "zoom", "focus", "tip", "step", "exposure", "pose_cue", "beyond_tip", "filter", "pose_silhouette")
+
+        fun offline(
+            aimPoint: Uv,
+            reason: String,
+            subject: SelectedSubject,
+            choice: CompositionChoice,
+            suggestedZoom: Float? = null,
+            directorCue: DirectorCue? = null,
+            poseSilhouette: PoseSilhouette? = null,
+        ): Recommendation = Recommendation(
+            aimPoint = aimPoint,
+            confidence = 0.85,
+            alreadyGood = aimPoint == Uv.CENTER,
+            reason = reason,
+            subject = subject,
+            choice = choice,
+            suggestedZoom = suggestedZoom,
+            directorCue = directorCue,
+            poseSilhouette = poseSilhouette,
+            isOfflineBaseline = true,
+        )
 
         fun hasJsonTokens(text: String): Boolean {
             if (text.length > 8192 || !text.trimStart().startsWith('{')) return false
@@ -121,9 +144,11 @@ internal class Recommendation private constructor(
             val referenceGuidance = ReferenceGuidance.parse(fields["pose_cue"], fields["beyond_tip"])
             val filterSuggestion = AiFilterSuggestion.parse(fields["filter"])
             val subject = picked.toSelectedSubject(nameOverride)
+            val poseSilhouette = PoseSilhouette.parse(fields["pose_silhouette"])
+                ?: PoseSilhouette.inferForPortrait(choice, faceCount = if (subject.person) 1 else 0, isPerson = subject.person)
             val aim = CompositionChoice.aimPointFor(subject.bounds, choice)
             return PlanResult.Accepted(
-                Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, candidateId = id, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion, referenceGuidance = referenceGuidance, filterSuggestion = filterSuggestion)
+                Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, candidateId = id, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion, referenceGuidance = referenceGuidance, filterSuggestion = filterSuggestion, poseSilhouette = poseSilhouette)
             )
         }
 
@@ -148,9 +173,11 @@ internal class Recommendation private constructor(
                 val exposureSuggestion = AiExposureSuggestion.parse(fields["exposure"])
                 val referenceGuidance = ReferenceGuidance.parse(fields["pose_cue"], fields["beyond_tip"])
                 val filterSuggestion = AiFilterSuggestion.parse(fields["filter"])
+                val poseSilhouette = PoseSilhouette.parse(fields["pose_silhouette"])
+                    ?: PoseSilhouette.inferForPortrait(choice, faceCount = if (subject.person) 1 else 0, isPerson = subject.person)
                 val aim = CompositionChoice.aimPointFor(subject.bounds, choice)
                 return PlanResult.Accepted(
-                    Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion, referenceGuidance = referenceGuidance, filterSuggestion = filterSuggestion)
+                    Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion, referenceGuidance = referenceGuidance, filterSuggestion = filterSuggestion, poseSilhouette = poseSilhouette)
                 )
             }
             if (fields.keys != setOf("aimPoint", "confidence", "alreadyGood", "reason", "subject")) return malformed

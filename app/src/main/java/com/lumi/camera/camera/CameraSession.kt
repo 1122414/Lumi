@@ -69,10 +69,14 @@ import com.lumi.camera.shotplan.DirectorCue
 import com.lumi.camera.shotplan.ModelConfig
 import com.lumi.camera.shotplan.ModelFailure
 import com.lumi.camera.shotplan.ModelReply
+import com.lumi.camera.shotplan.OnDeviceCompositionAdvisor
 import com.lumi.camera.shotplan.PlanProblem
 import com.lumi.camera.shotplan.PlanResult
+import com.lumi.camera.shotplan.PoseSilhouette
 import com.lumi.camera.shotplan.PresetSelection
 import com.lumi.camera.shotplan.ProactiveTrigger
+import com.lumi.camera.shotplan.SessionShotMemory
+import com.lumi.camera.shotplan.SessionShotRecord
 import com.lumi.camera.shotplan.ProactivityMode
 import com.lumi.camera.shotplan.RecommendationRequests
 import com.lumi.camera.shotplan.ReferenceGuidance
@@ -140,6 +144,8 @@ internal data class Viewfinder(
     val stepProgress: StepProgress? = null,
     val referenceGuidance: ReferenceGuidance? = null,
     val lightGuidance: LightGuidance? = null,
+    val poseSilhouette: PoseSilhouette? = null,
+    val isOfflineBaseline: Boolean = false,
 )
 
 internal data class ViewfinderZoom(val ratio: Float = 1f, val min: Float = 1f, val max: Float = 1f,
@@ -198,10 +204,17 @@ internal class CameraSession(
     private var requestGeometry: FrameGeometry? = null
     private val timeout = Runnable {
         if (requests.active != null) {
+            val hadOfflineBaseline = run?.target?.isOfflineBaseline == true
             val notice = if (requestGeometry == null) "取景超时，未取得同步的画面和手机姿态。" else VisionChat.TIMEOUT_NOTICE
             if (call != null) onConnection(ConnectionResult.UNREACHABLE)
             cancelRecommendation()
-            onRecommendationStatus(notice)
+            if (hadOfflineBaseline) {
+                onRecommendationStatus(null)
+                onMessage("云端响应超时，已保持端侧离线构图引导")
+            } else {
+                onRecommendationStatus(notice)
+            }
+            render()
         }
     }
     private val future = ProcessCameraProvider.getInstance(context)
@@ -230,6 +243,7 @@ internal class CameraSession(
     private var proactivityMode = initialProactivity
     private val proactiveTrigger = ProactiveTrigger()
     private val aestheticPrefs = AestheticPreferenceStore(context)
+    private val sessionMemory = SessionShotMemory()
     private var lastReadyState = false
     private var selection: Selection? = null
     private var run: Run? = null
@@ -566,6 +580,7 @@ internal class CameraSession(
         if (!runCatching { p.hasCamera(selector) }.getOrDefault(false)) return
         lensFacing = nextFacing
         desiredZoom = 1f
+        sessionMemory.clear()
         onLens(ViewfinderLens(lensFacing == CameraSelector.LENS_FACING_FRONT, canSwitchLens))
         bind()
     }
@@ -860,6 +875,8 @@ internal class CameraSession(
             stepProgress = visibleStep,
             referenceGuidance = active?.target?.referenceGuidance,
             lightGuidance = if (active != null) stabilizedLight else null,
+            poseSilhouette = active?.target?.poseSilhouette,
+            isOfflineBaseline = active?.target?.isOfflineBaseline == true,
         ))
     }
 
@@ -1430,7 +1447,7 @@ internal class CameraSession(
 
     private fun recommend(tapUv: Uv?, tapPreview: Point?, statusOverride: String? = null) {
         if (proactivityMode == ProactivityMode.QUIET) return
-        if (binding == null || zoom.changing || requests.config.validationError(BuildConfig.DEBUG) != null) return
+        if (binding == null || zoom.changing) return
         val now = SystemClock.elapsedRealtimeNanos()
         if (statusOverride == null) {
             proactiveTrigger.onManualOrCaptured(now, poses?.latestAt(now) ?: latest?.observation?.pose)
@@ -1453,6 +1470,52 @@ internal class CameraSession(
         handler.postDelayed(timeout, (token.deadlineNs - now) / 1_000_000L)
     }
 
+    /**
+     * Launches an instant (< 15ms) on-device composition baseline so the user receives immediate
+     * alignment-ring guidance even before the cloud VLM responds or while completely offline.
+     */
+    private fun applyOfflineBaseline(
+        source: SceneFrame,
+        sample: RecommendationFrame,
+        capturedZoom: Float,
+    ): Boolean {
+        val obs = source.observation ?: return false
+        val pixels = source.pixels ?: return false
+        val zoomStops = if (lensFacing == CameraSelector.LENS_FACING_FRONT) emptyList() else zoom.keyRatios
+        val advice = OnDeviceCompositionAdvisor.advise(
+            frame = source,
+            candidates = sample.candidates,
+            preset = presetSelection.preset,
+            currentZoom = capturedZoom,
+            zoomStops = zoomStops,
+            tapUv = sample.tapUv,
+        ) ?: return false
+        val instantOutline = SubjectOutline.instantBox(obs, advice.subject, pixels)
+        val baseTarget = when (val decision = RememberedComposition.recommended(source, advice, instantOutline, capturedZoom)) {
+            is PlanResult.Accepted -> decision.value
+            is PlanResult.Rejected -> return false
+        }
+        val activePreset = presetSelection.preset
+        val effectiveTarget = if (activePreset == CompositionPreset.AUTO) {
+            baseTarget
+        } else {
+            baseTarget.withPreset(presetSelection, obs.pose, obs.lens, null)
+        }
+        observer?.tracker = instantOutline?.let { SubjectTracker.from(it, pixels) }
+        latestShift = null
+        trackerLostSinceNs = null
+        subjectLostNotified = false
+        val subjectName = advice.subject.name
+        selection = Selection(subjectName, source.geometry, obs, instantOutline)
+        val caption = if (effectiveTarget === baseTarget) {
+            advice.caption
+        } else {
+            effectiveTarget.choice?.let { "$subjectName·${it.label}" } ?: advice.caption
+        }
+        startGuide(effectiveTarget, caption, subjectName)
+        return true
+    }
+
     private fun sendRecommendation(token: RequestToken, sample: RecommendationFrame) {
         val source = sample.scene
         val now = SystemClock.elapsedRealtimeNanos()
@@ -1465,19 +1528,40 @@ internal class CameraSession(
             observer?.pendingFrame?.await(token)
             return
         }
+        val capturedZoom = appliedZoom
+        val hasBaseline = applyOfflineBaseline(source, sample, capturedZoom)
+        val cloudConfigured = token.config.validationError(BuildConfig.DEBUG) == null
+        if (!cloudConfigured) {
+            sample.close()
+            requests.finish(token, SystemClock.elapsedRealtimeNanos())
+            handler.removeCallbacks(timeout)
+            call = null
+            requestGeometry = null
+            pendingCandidates = emptyList()
+            pendingCandidateGeometry = null
+            pendingTapPreview = null
+            if (hasBaseline) {
+                onRecommendationStatus(null)
+                onMessage("端侧离线构图已就绪（配置云端模型可开启高级导演）")
+            } else {
+                onRecommendationStatus("当前画面未识别到明确主体，请调整角度后重试。")
+            }
+            render()
+            return
+        }
         val task = VisionChat(token.config, token.deadlineNs)
         call = task
         requestGeometry = source.geometry
         pendingCandidates = sample.candidates
         pendingCandidateGeometry = source.geometry
         render()
-        val capturedZoom = appliedZoom
         val capturedZoomStops = if (lensFacing == CameraSelector.LENS_FACING_FRONT) emptyList() else zoom.keyRatios
         val capturedFront = lensFacing == CameraSelector.LENS_FACING_FRONT
         val capturedPreset = presetSelection.preset
         val candidates = sample.candidates
         val userTapped = sample.tapUv != null
         val preferencePrior = aestheticPrefs.read().promptPrior()
+        val sessionMemoryHint = sessionMemory.promptSummary(System.currentTimeMillis())
         val telemetrySummary = currentTelemetry(source).promptSummary(capabilities)
         val requestExposureAdvice = exposureMode != ExposureControlMode.AUTO
         val requestFilterAdvice = filterMode == FilterSelectionMode.AI_SMART ||
@@ -1487,6 +1571,8 @@ internal class CameraSession(
         val capturedRefJpeg = referenceCompareJpeg
         onRecommendationStatus(
             when {
+                hasBaseline && capturedRefJpeg != null -> "端侧已就绪 · 云端对照参考图精修中…"
+                hasBaseline -> "端侧已就绪 · 云端精修中…"
                 capturedRefJpeg != null && userTapped -> "正在对照参考图分析所选人物与超越方案…"
                 capturedRefJpeg != null -> "正在对照参考图生成复刻与超越建议…"
                 userTapped -> "正在围绕所选主体构图…"
@@ -1512,6 +1598,7 @@ internal class CameraSession(
                         preferencePrior, telemetrySummary, requestExposureAdvice,
                         capturedRefRecipe, capturedRefJpeg,
                         requestFilterAdvice, capturedFilterPreset,
+                        sessionMemoryHint,
                     )
                 )
             } catch (e: Exception) { Result.failure(e) }
@@ -1552,9 +1639,15 @@ internal class CameraSession(
         pendingCandidates = emptyList()
         pendingCandidateGeometry = null
         pendingTapPreview = null
+        val hadOfflineBaseline = run?.target?.isOfflineBaseline == true
         if (completion == RecommendationRequests.Completion.EXPIRED) {
             saveDiagnostic("EXPIRED", times, SystemClock.elapsedRealtimeNanos(), sentJpeg, capturedFront, capturedZoom, source.observation, result.getOrNull(), result.exceptionOrNull(), attempt, candidateCount, userTapped)
-            onRecommendationStatus(VisionChat.TIMEOUT_NOTICE)
+            if (hadOfflineBaseline) {
+                onRecommendationStatus(null)
+                onMessage("云端响应超时，已保持端侧离线构图引导")
+            } else {
+                onRecommendationStatus(VisionChat.TIMEOUT_NOTICE)
+            }
             render()
             return
         }
@@ -1562,31 +1655,34 @@ internal class CameraSession(
             val decided = SystemClock.elapsedRealtimeNanos()
             recordDecision("REQUEST_FAILED", times, decided)
             saveDiagnostic("REQUEST_FAILED", times, decided, sentJpeg, capturedFront, capturedZoom, source.observation, null, it, attempt, candidateCount, userTapped)
-            onRecommendationStatus(when (it) {
-                is ModelFailure -> it.notice
-                is SocketTimeoutException -> VisionChat.TIMEOUT_NOTICE
-                else -> "推荐请求失败，请检查连接后重试。"
-            })
+            if (hadOfflineBaseline) {
+                onRecommendationStatus(null)
+                onMessage("网络不可用，已保持端侧离线构图引导")
+            } else {
+                onRecommendationStatus(when (it) {
+                    is ModelFailure -> it.notice
+                    is SocketTimeoutException -> VisionChat.TIMEOUT_NOTICE
+                    else -> "推荐请求失败，请检查连接后重试。"
+                })
+            }
             render()
             return
         }
-        val outline = attempt?.outline
-        val subjectTracker = if (outline != null && source.pixels != null) SubjectTracker.from(outline, source.pixels) else null
-        latestShift = null
-        trackerLostSinceNs = null
-        subjectLostNotified = false
-        observer?.tracker = subjectTracker
-        selection = Selection(token.config.safeText(reply.name), source.geometry, source.observation, outline)
         fun reject(problem: PlanProblem) {
-            observer?.watchPerson = false
-            view.removeCallbacks(drawDirection)
-            if (outline != null) view.postOnAnimation(drawDirection)
             val decided = SystemClock.elapsedRealtimeNanos()
             recordDecision(problem.name, times, decided)
             saveDiagnostic(problem.name, times, decided, sentJpeg, capturedFront, capturedZoom, source.observation, reply, null, attempt, candidateCount, userTapped)
-            onRecommendationStatus(problem.notice)
+            if (hadOfflineBaseline) {
+                onRecommendationStatus(null)
+            } else {
+                observer?.watchPerson = false
+                view.removeCallbacks(drawDirection)
+                if (attempt?.outline != null) view.postOnAnimation(drawDirection)
+                onRecommendationStatus(problem.notice)
+            }
             render()
         }
+        val outline = attempt?.outline
         val plan = when (val decision = reply.decision) {
             is PlanResult.Accepted -> decision.value
             is PlanResult.Rejected -> return reject(decision.problem)
@@ -1595,6 +1691,12 @@ internal class CameraSession(
             is PlanResult.Accepted -> decision.value
             is PlanResult.Rejected -> return reject(decision.problem)
         }
+        val subjectTracker = if (outline != null && source.pixels != null) SubjectTracker.from(outline, source.pixels) else null
+        latestShift = null
+        trackerLostSinceNs = null
+        subjectLostNotified = false
+        observer?.tracker = subjectTracker
+        selection = Selection(token.config.safeText(reply.name), source.geometry, source.observation, outline)
         val stepDir = plan.stepDirection
         if (stepDir != null && outline != null && source.pixels != null) {
             observer?.stepTracker = ParallaxStepTracker.from(stepDir, outline, source.pixels)
@@ -1775,6 +1877,7 @@ internal class CameraSession(
         val captureReason = run?.reason ?: selection?.name
         val captureCue = run?.target?.directorCue
         val captureChoice = run?.target?.choice
+        val captureSubjectName = run?.subjectName ?: selection?.name
         val captureZoom = zoom.ratio
         val captureLuma = latest?.meanLuma
         val captureClutter = latest?.backgroundClutter
@@ -1803,6 +1906,19 @@ internal class CameraSession(
                     backgroundClutter = captureClutter,
                     unresolvedStep = captureUnresolvedStep,
                     faceBox = captureFaceBox,
+                )
+                val captureLightTag = latest?.lumaStats?.lightGuidance?.position?.name
+                sessionMemory.record(
+                    SessionShotRecord(
+                        capturedAtMs = System.currentTimeMillis(),
+                        subjectName = captureSubjectName,
+                        choice = captureChoice,
+                        zoomRatio = captureZoom,
+                        wasReady = captureReady,
+                        rollDeg = captureRoll,
+                        lightTag = captureLightTag,
+                        tipGiven = captureCue?.tip,
+                    ),
                 )
                 onCaptured(review)
             } else {

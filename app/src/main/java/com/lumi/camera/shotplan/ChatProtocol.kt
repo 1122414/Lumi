@@ -37,6 +37,7 @@ internal object ChatProtocol {
         hasReferenceImage: Boolean = false,
         requestFilterAdvice: Boolean = false,
         activeFilterPreset: FilterPreset? = null,
+        sessionMemoryHint: String? = null,
     ): String {
         val zoomHint = if (zoomStops.size >= 2) {
             val stopsText = zoomStops.joinToString("/") { String.format(Locale.ROOT, "%.1f", it).removeSuffix(".0") }
@@ -91,15 +92,17 @@ internal object ChatProtocol {
                 append("。图中编号框为候选主体：$listText。")
                 append(pickInstruction)
                 append("name 填一至六字主体简称。")
-                append("choice 必选其一：keep(保持现状)、center(居中平衡)、left_third(放左三分右侧留白)、right_third(放右三分左侧留白)、tight_top(减少顶部多余留白)、more_headroom(增加顶部留白)、pull_in(拉回安全区)。")
-                append("若主体明显偏左/偏右或周边杂乱，优先选 center、left_third 或 right_third；仅在水平位置已较协调且仅顶部空间失衡时才选 tight_top 或 more_headroom。")
-                append("再按问题严重度选最值钱的 1 个执导维度 focus(framing/background/lighting/pose)，用 12 字以内零术语口语写一条 tip（如避开背景杂物、借侧光、微调姿势）；若仅需转动构图可省略 focus 和 tip。")
+                append("choice 必选其一：keep(保持现状)、center(居中平衡)、left_third(放左三分右侧留白)、right_third(放右三分左侧留白)、tight_top(减少顶部多余留白)、more_headroom(增加顶部留白)、pull_in(拉回安全区)、lower_third(低三分显天空/建筑顶部)、group_balance(多人合影重心平衡)、scenic_portrait(人小景大留白意境)、leading_frame(借景/道路建筑线条对称聚焦)。")
+                append("若主体明显偏左/偏右或周边杂乱，优先选 center、left_third、right_third、scenic_portrait 或 leading_frame；多人合影优先 group_balance；大天空/高建筑优先 lower_third。")
+                append("若主角是人物且适合姿势引导，可附加 \"pose_silhouette\":\"half_left\"|\"half_right\"|\"center_portrait\"|\"full_scenic\"|\"group\"，否则省略。")
+                append("再按问题严重度选最值钱的 1 个执导维度 focus(framing/background/lighting/pose)，用 12 字以内零术语口语写一条 tip（如避开背景杂物、收仰俯角校正建筑线条、借侧光、微调姿势）；若仅需转动构图可省略 focus 和 tip。")
                 append("仅当原地转动无法避开背后柱子/路人/遮挡物或需改变拍摄距离时，可加 \"step\":\"left\"|\"right\"|\"closer\"|\"back\"，否则省略。")
                 if (zoomHint.isNotEmpty()) append(zoomHint)
                 if (!telemetrySummary.isNullOrBlank()) append(telemetrySummary)
                 if (exposureHint.isNotEmpty()) append(exposureHint)
                 if (filterHint.isNotEmpty()) append(filterHint)
                 if (referenceHint.isNotEmpty()) append(referenceHint)
+                if (!sessionMemoryHint.isNullOrBlank()) append(sessionMemoryHint)
                 if (!preferencePrior.isNullOrBlank()) append(preferencePrior)
                 append("reason 十字以内写画面效果，不写左右上下移动指令。")
             }
@@ -110,6 +113,7 @@ internal object ChatProtocol {
             if (exposureHint.isNotEmpty()) parts += exposureHint
             if (filterHint.isNotEmpty()) parts += filterHint
             if (referenceHint.isNotEmpty()) parts += referenceHint
+            if (!sessionMemoryHint.isNullOrBlank()) parts += sessionMemoryHint
             if (!preferencePrior.isNullOrBlank()) parts += preferencePrior
             parts.joinToString("\n")
         }
@@ -131,6 +135,7 @@ internal object ChatProtocol {
         referenceJpeg: ByteArray? = null,
         requestFilterAdvice: Boolean = false,
         activeFilterPreset: FilterPreset? = null,
+        sessionMemoryHint: String? = null,
     ): ByteArray {
         val liveUrl = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
         val hasRefImg = referenceJpeg != null && referenceJpeg.isNotEmpty()
@@ -147,6 +152,7 @@ internal object ChatProtocol {
                 hasReferenceImage = hasRefImg,
                 requestFilterAdvice = requestFilterAdvice,
                 activeFilterPreset = activeFilterPreset,
+                sessionMemoryHint = sessionMemoryHint,
             )))
         if (hasRefImg) {
             val refUrl = "data:image/jpeg;base64," + Base64.encodeToString(referenceJpeg, Base64.NO_WRAP)
