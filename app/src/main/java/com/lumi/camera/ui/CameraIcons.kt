@@ -14,6 +14,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.lumi.camera.camera.FlashOption
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -147,5 +148,72 @@ internal fun ExposurePlusMinusIcon(tint: Color, size: Dp = 18.dp) {
         // Minus (lower)
         val minusY = h * 0.76f
         drawLine(tint, Offset(center.x - arm, minusY), Offset(center.x + arm, minusY), sw, StrokeCap.Round)
+    }
+}
+
+@Composable
+internal fun FlashIcon(option: FlashOption, tint: Color, size: Dp = 20.dp) {
+    Canvas(Modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        val sw = 1.55.dp.toPx()
+        val stroke = Stroke(sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val bolt = Path().apply {
+            moveTo(w * 0.56f, h * 0.10f)
+            lineTo(w * 0.25f, h * 0.54f)
+            lineTo(w * 0.50f, h * 0.54f)
+            lineTo(w * 0.42f, h * 0.90f)
+            lineTo(w * 0.76f, h * 0.44f)
+            lineTo(w * 0.51f, h * 0.44f)
+            close()
+        }
+        if (option == FlashOption.TORCH) {
+            drawPath(bolt, tint)
+            // Small torch glow rays on upper-right
+            drawLine(tint, Offset(w * 0.76f, h * 0.16f), Offset(w * 0.88f, h * 0.12f), sw * 0.9f, StrokeCap.Round)
+            drawLine(tint, Offset(w * 0.80f, h * 0.28f), Offset(w * 0.92f, h * 0.28f), sw * 0.9f, StrokeCap.Round)
+        } else {
+            drawPath(bolt, tint, style = stroke)
+        }
+        when (option) {
+            FlashOption.OFF -> {
+                drawLine(tint, Offset(w * 0.16f, h * 0.18f), Offset(w * 0.84f, h * 0.84f), sw, StrokeCap.Round)
+            }
+            FlashOption.AUTO -> {
+                // Tiny crisp "A" indicator dot + chevron on bottom-right
+                val ax = w * 0.78f
+                val ay = h * 0.82f
+                val aPath = Path().apply {
+                    moveTo(ax - w * 0.09f, ay + h * 0.08f)
+                    lineTo(ax, ay - h * 0.10f)
+                    lineTo(ax + w * 0.09f, ay + h * 0.08f)
+                }
+                drawPath(aPath, tint, style = Stroke(sw * 0.85f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+            }
+            FlashOption.ON, FlashOption.TORCH -> Unit
+        }
+    }
+}
+
+@Composable
+internal fun SunEvIcon(tint: Color, size: Dp = 15.dp) {
+    Canvas(Modifier.size(size)) {
+        val r = this.size.minDimension * 0.20f
+        val inner = r * 1.48f
+        val outer = this.size.minDimension * 0.46f
+        val sw = 1.25.dp.toPx()
+        drawCircle(tint, radius = r, center = center)
+        for (i in 0 until 8) {
+            val angle = Math.toRadians(i * 45.0)
+            val cosA = cos(angle).toFloat()
+            val sinA = sin(angle).toFloat()
+            drawLine(
+                color = tint,
+                start = Offset(center.x + inner * cosA, center.y + inner * sinA),
+                end = Offset(center.x + outer * cosA, center.y + outer * sinA),
+                strokeWidth = sw,
+                cap = StrokeCap.Round,
+            )
+        }
     }
 }

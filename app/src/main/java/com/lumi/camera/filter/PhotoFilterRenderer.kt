@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import com.lumi.camera.camera.CaptureAspectRatio
 import java.io.ByteArrayInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -52,6 +53,7 @@ internal object PhotoFilterRenderer {
         grade: FilterGrade,
         mirrorHorizontal: Boolean,
         fallbackRotationDegrees: Int = 0,
+        aspectRatio: CaptureAspectRatio = CaptureAspectRatio.RATIO_3_4,
         filePrefix: String = "Lumi",
     ): Uri? {
         val exifMap = readExifTags(jpegBytes)
@@ -90,18 +92,31 @@ internal object PhotoFilterRenderer {
         val upright = applyOrientationAndMirror(decoded, orientation, mirrorHorizontal)
         if (upright !== decoded) decoded.recycle()
 
+        val cropped = if (aspectRatio != CaptureAspectRatio.RATIO_3_4) {
+            val rect = aspectRatio.cropRectFor(upright.width, upright.height)
+            if (rect.width < upright.width || rect.height < upright.height) {
+                Bitmap.createBitmap(upright, rect.left, rect.top, rect.width, rect.height).also {
+                    upright.recycle()
+                }
+            } else {
+                upright
+            }
+        } else {
+            upright
+        }
+
         val outputBitmap = try {
-            if (grade.isIdentity) upright else renderWithOffscreenGl(upright, grade) ?: upright
+            if (grade.isIdentity) cropped else renderWithOffscreenGl(cropped, grade) ?: cropped
         } catch (e: RuntimeException) {
             Log.w("LumiFilter", "Offscreen GL photo filter failed, saving ungraded photo", e)
-            upright
+            cropped
         }
 
         return try {
             writeToGallery(context, outputBitmap, exifMap, filePrefix)
         } finally {
-            if (outputBitmap !== upright) outputBitmap.recycle()
-            upright.recycle()
+            if (outputBitmap !== cropped) outputBitmap.recycle()
+            cropped.recycle()
         }
     }
 

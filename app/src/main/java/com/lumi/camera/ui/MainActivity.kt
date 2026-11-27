@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
+import android.view.OrientationEventListener
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -63,6 +65,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -82,8 +85,10 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
@@ -97,16 +102,21 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import com.lumi.camera.BuildConfig
+import com.lumi.camera.camera.CameraControlsUiState
 import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.CandidateOverlay
+import com.lumi.camera.camera.CaptureAspectRatio
 import com.lumi.camera.camera.CloseupOverlay
+import com.lumi.camera.camera.DeviceOrientationHelper
 import com.lumi.camera.camera.ExposureControlMode
 import com.lumi.camera.camera.ExposureSolver
+import com.lumi.camera.camera.FlashOption
 import com.lumi.camera.camera.LiveTelemetry
 import com.lumi.camera.camera.NativeProcessingMode
 import com.lumi.camera.camera.NativeProcessingUiState
 import com.lumi.camera.camera.Point
+import com.lumi.camera.camera.TimerOption
 import com.lumi.camera.camera.Viewfinder
 import com.lumi.camera.camera.ViewfinderLens
 import com.lumi.camera.camera.ViewfinderZoom
@@ -150,12 +160,24 @@ class MainActivity : ComponentActivity() {
     private var allowed by mutableStateOf(false)
     private var requested by mutableStateOf(false)
     private var session: CameraSession? = null
+    internal var hardwareShutterHandler: (() -> Boolean)? = null
     private val permissions = CameraPermissions(this, { granted ->
         allowed = granted
         requested = true
     }, { granted ->
         if (granted) session?.save() else notifyUser("未获准写入系统相册。请在系统设置中允许存储权限后重试。")
     })
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            val handler = hardwareShutterHandler
+            if (handler != null) {
+                if (event?.repeatCount == 0) handler()
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
 
     override fun onResume() {
         super.onResume()
@@ -265,6 +287,7 @@ private fun ColumnScope.CameraScreen(
     var cameraSettingsOpen by remember { mutableStateOf(false) }
     var aiMenuOpen by remember { mutableStateOf(false) }
     var diagnosticOpen by remember { mutableStateOf(false) }
+    var quickControlsOpen by remember { mutableStateOf(false) }
     var activeTray by remember { mutableStateOf(BottomTray.NONE) }
     var showGrid by remember { mutableStateOf(uiPrefs.getBoolean("show_grid", true)) }
 
@@ -277,6 +300,33 @@ private fun ColumnScope.CameraScreen(
     var nativeProcessingMode by remember {
         mutableStateOf(NativeProcessingMode.fromWire(uiPrefs.getString("native_processing_mode", null)))
     }
+    val initialFlash = remember {
+        FlashOption.fromWire(uiPrefs.getString("flash_option", null)).let {
+            if (it == FlashOption.TORCH) FlashOption.OFF else it
+        }
+    }
+    val initialAspectRatio = remember {
+        CaptureAspectRatio.fromWire(uiPrefs.getString("aspect_ratio", null))
+    }
+    var timerOption by remember {
+        mutableStateOf(TimerOption.fromWire(uiPrefs.getString("timer_option", null)))
+    }
+    var controlsState by remember {
+        mutableStateOf(CameraControlsUiState(flash = initialFlash, aspectRatio = initialAspectRatio))
+    }
+    var deviceBucketDeg by remember { mutableIntStateOf(0) }
+    val uiIconRotation by animateFloatAsState(
+        targetValue = DeviceOrientationHelper.toUiIconRotation(deviceBucketDeg),
+        animationSpec = tween(220),
+        label = "gravity icon rotation",
+    )
+    var focusTap by remember { mutableStateOf<FocusTapState?>(null) }
+    var evDragActive by remember { mutableStateOf(false) }
+    var viewfinderWidthPx by remember { mutableFloatStateOf(0f) }
+    var viewfinderHeightPx by remember { mutableFloatStateOf(0f) }
+    var countdownRemaining by remember { mutableIntStateOf(0) }
+    var shutterFlashAlpha by remember { mutableFloatStateOf(0f) }
+    val scope = rememberCoroutineScope()
     val initialFilterMode = remember {
         FilterSelectionMode.fromWire(uiPrefs.getString("filter_mode", null))
     }
@@ -356,6 +406,9 @@ private fun ColumnScope.CameraScreen(
             onFilter = { nextFilter ->
                 filterState = nextFilter
             },
+            onControls = { nextControls ->
+                controlsState = nextControls
+            },
             initialProactivity = proactivityMode,
             initialExposureMode = exposureMode,
             initialNativeProcessing = nativeProcessingMode,
@@ -363,6 +416,8 @@ private fun ColumnScope.CameraScreen(
             initialFilterPreset = initialFilterPreset,
             initialFilterIntensity = initialFilterIntensity,
             initialFilterAiAdaptive = initialFilterAiAdaptive,
+            initialFlash = initialFlash,
+            initialAspectRatio = initialAspectRatio,
         )
     }
 
@@ -384,6 +439,80 @@ private fun ColumnScope.CameraScreen(
             reviewBannerVisible = false
         }
     }
+    fun fireImmediateShutter() {
+        hostView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        scope.launch {
+            shutterFlashAlpha = 0.72f
+            delay(75L)
+            shutterFlashAlpha = 0f
+        }
+        onShoot()
+    }
+
+    fun triggerShutter() {
+        if (!bound || zoom.changing) return
+        if (countdownRemaining > 0) {
+            countdownRemaining = 0
+            hostView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            return
+        }
+        if (timerOption == TimerOption.OFF) {
+            fireImmediateShutter()
+        } else {
+            countdownRemaining = timerOption.seconds
+        }
+    }
+
+    LaunchedEffect(countdownRemaining) {
+        if (countdownRemaining <= 0) return@LaunchedEffect
+        hostView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        delay(1000L)
+        if (countdownRemaining == 1) {
+            countdownRemaining = 0
+            fireImmediateShutter()
+        } else if (countdownRemaining > 1) {
+            countdownRemaining -= 1
+        }
+    }
+
+    LaunchedEffect(focusTap?.token) {
+        if (focusTap == null) return@LaunchedEffect
+        delay(2800L)
+        focusTap = null
+        evDragActive = false
+    }
+
+    DisposableEffect(context, session) {
+        val listener = object : OrientationEventListener(context) {
+            override fun onOrientationChanged(orientation: Int) {
+                val next = DeviceOrientationHelper.resolveBucketDegrees(orientation, deviceBucketDeg)
+                if (next != deviceBucketDeg) {
+                    deviceBucketDeg = next
+                    session.setDeviceOrientationDegrees(next)
+                }
+            }
+        }
+        if (listener.canDetectOrientation()) listener.enable()
+        onDispose { listener.disable() }
+    }
+
+    val anyDialogOpen = cameraSettingsOpen || modelSettingsOpen || diagnosticOpen || reviewDialogOpen || referenceDialogOpen
+    DisposableEffect(owner, bound, zoom.changing, anyDialogOpen, timerOption, countdownRemaining) {
+        owner.hardwareShutterHandler = if (!anyDialogOpen) {
+            {
+                if (bound && !zoom.changing) {
+                    triggerShutter()
+                    true
+                } else {
+                    false
+                }
+            }
+        } else {
+            null
+        }
+        onDispose { owner.hardwareShutterHandler = null }
+    }
+
     DisposableEffect(session) {
         onSession(session)
         session.attach()
@@ -418,7 +547,7 @@ private fun ColumnScope.CameraScreen(
         }
         autoShootProgress = 1f
         autoShotFired = true
-        onShoot()
+        fireImmediateShutter()
     }
 
     var settled by remember { mutableStateOf(false) }
@@ -447,62 +576,105 @@ private fun ColumnScope.CameraScreen(
         else -> "可用"
     }
 
-    // 1. Minimalist Top Bar (Upright wordmark + status dot | Flip, Reference, AI mode, Settings)
+    // 1. Minimalist Top Bar (Wordmark + Quick Ratio/Timer pill | Flash, Flip, Reference, AI mode, Settings)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(50.dp)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 14.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(role = Role.Button) { modelSettingsOpen = true }
-                .padding(horizontal = 4.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = "Lumi",
-                color = LumiColors.TextPrimary,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 0.4.sp,
-            )
-            Box(
-                Modifier
-                    .size(6.dp)
-                    .clip(CircleShape)
-                    .background(modelDotColor),
-            )
-            if (nativeProcessingMode == NativeProcessingMode.PURE) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(role = Role.Button) { modelSettingsOpen = true }
+                    .padding(horizontal = 4.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 Text(
-                    text = "纯净",
-                    color = LumiColors.Ivory.copy(alpha = 0.85f),
-                    fontSize = 10.sp,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(LumiColors.IvoryMuted)
-                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                    text = "Lumi",
+                    color = LumiColors.TextPrimary,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 0.4.sp,
+                )
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(modelDotColor),
+                )
+            }
+
+            val quickBadgeActive = quickControlsOpen ||
+                controlsState.aspectRatio != CaptureAspectRatio.RATIO_3_4 ||
+                timerOption != TimerOption.OFF
+            val quickLabel = buildString {
+                append(controlsState.aspectRatio.label)
+                if (timerOption != TimerOption.OFF) append("·${timerOption.label}")
+            }
+            Surface(
+                onClick = { quickControlsOpen = !quickControlsOpen },
+                shape = RoundedCornerShape(12.dp),
+                color = if (quickBadgeActive) LumiColors.IvoryMuted else Color(0x16FFFFFF),
+                border = BorderStroke(
+                    1.dp,
+                    if (quickBadgeActive) LumiColors.Ivory.copy(alpha = 0.65f) else LumiColors.Hairline,
+                ),
+            ) {
+                Text(
+                    text = quickLabel,
+                    color = if (quickBadgeActive) LumiColors.Ivory else LumiColors.TextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                 )
             }
         }
 
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (controlsState.hasFlash) {
+                val flashActive = controlsState.flash != FlashOption.OFF
+                TopIconButton(
+                    description = controlsState.flash.label,
+                    active = flashActive,
+                    enabled = bound && !zoom.changing,
+                    onClick = {
+                        val next = session.cycleFlash()
+                        uiPrefs.edit().putString("flash_option", next.wire).apply()
+                        onMessage(next.label)
+                    },
+                ) {
+                    Box(Modifier.graphicsLayer { rotationZ = uiIconRotation }) {
+                        FlashIcon(
+                            option = controlsState.flash,
+                            tint = if (flashActive) LumiColors.Ivory else LumiColors.TextPrimary,
+                        )
+                    }
+                }
+            }
+
             if (lens.canSwitch) {
                 TopIconButton(
                     description = if (lens.front) "切换到后置摄像头" else "切换到前置摄像头",
                     enabled = bound && !zoom.changing,
                     onClick = session::switchCamera,
                 ) {
-                    LensFlipIcon(
-                        tint = if (bound && !zoom.changing) LumiColors.TextPrimary else LumiColors.TextMuted,
-                    )
+                    Box(Modifier.graphicsLayer { rotationZ = uiIconRotation }) {
+                        LensFlipIcon(
+                            tint = if (bound && !zoom.changing) LumiColors.TextPrimary else LumiColors.TextMuted,
+                        )
+                    }
                 }
             }
 
@@ -514,9 +686,11 @@ private fun ColumnScope.CameraScreen(
                     else launchReferencePicker()
                 },
             ) {
-                ReferenceFrameIcon(
-                    tint = if (referenceState.hasReference) LumiColors.Ivory else LumiColors.TextPrimary,
-                )
+                Box(Modifier.graphicsLayer { rotationZ = uiIconRotation }) {
+                    ReferenceFrameIcon(
+                        tint = if (referenceState.hasReference) LumiColors.Ivory else LumiColors.TextPrimary,
+                    )
+                }
             }
 
             Box {
@@ -526,14 +700,16 @@ private fun ColumnScope.CameraScreen(
                     active = aiHighlighted,
                     onClick = { aiMenuOpen = true },
                 ) {
-                    AiModeReticleIcon(
-                        tint = when {
-                            autoShoot -> LumiColors.Emerald
-                            proactivityMode == ProactivityMode.PROACTIVE -> LumiColors.Ivory
-                            proactivityMode == ProactivityMode.QUIET -> LumiColors.TextMuted
-                            else -> LumiColors.TextPrimary
-                        },
-                    )
+                    Box(Modifier.graphicsLayer { rotationZ = uiIconRotation }) {
+                        AiModeReticleIcon(
+                            tint = when {
+                                autoShoot -> LumiColors.Emerald
+                                proactivityMode == ProactivityMode.PROACTIVE -> LumiColors.Ivory
+                                proactivityMode == ProactivityMode.QUIET -> LumiColors.TextMuted
+                                else -> LumiColors.TextPrimary
+                            },
+                        )
+                    }
                 }
                 DropdownMenu(
                     expanded = aiMenuOpen,
@@ -590,7 +766,9 @@ private fun ColumnScope.CameraScreen(
                 description = "相机设置",
                 onClick = { cameraSettingsOpen = true },
             ) {
-                SettingsHexIcon(tint = LumiColors.TextPrimary)
+                Box(Modifier.graphicsLayer { rotationZ = uiIconRotation }) {
+                    SettingsHexIcon(tint = LumiColors.TextPrimary)
+                }
             }
         }
     }
@@ -606,7 +784,11 @@ private fun ColumnScope.CameraScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(3f / 4f)
-                .background(Color.Black),
+                .background(Color.Black)
+                .onSizeChanged { sz ->
+                    viewfinderWidthPx = sz.width.toFloat()
+                    viewfinderHeightPx = sz.height.toFloat()
+                },
         ) {
             AndroidView({ preview }, Modifier.matchParentSize())
 
@@ -620,19 +802,42 @@ private fun ColumnScope.CameraScreen(
                     .matchParentSize()
                     .clipToBounds()
                     .pointerInput(session) {
-                        detectTapGestures { offset ->
-                            if (activeTray != BottomTray.NONE) {
-                                activeTray = BottomTray.NONE
-                            }
-                            session.tapSubject(offset.x, offset.y)
-                        }
+                        detectTapGestures(
+                            onTap = { offset ->
+                                if (activeTray != BottomTray.NONE) activeTray = BottomTray.NONE
+                                if (quickControlsOpen) quickControlsOpen = false
+                                if (session.focusAt(offset.x, offset.y)) {
+                                    focusTap = FocusTapState(offset.x, offset.y, System.nanoTime())
+                                    evDragActive = false
+                                }
+                            },
+                            onLongPress = { offset ->
+                                if (activeTray != BottomTray.NONE) activeTray = BottomTray.NONE
+                                if (quickControlsOpen) quickControlsOpen = false
+                                focusTap = null
+                                evDragActive = false
+                                hostView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                                session.tapSubject(offset.x, offset.y)
+                            },
+                        )
                     }
                     .pointerInput(session) {
-                        detectTransformGestures { _, _, scale, _ ->
-                            if (scale != 1f) session.scaleZoom(scale)
+                        detectTransformGestures { _, pan, scale, _ ->
+                            if (abs(scale - 1f) > 0.002f) {
+                                session.scaleZoom(scale)
+                            } else {
+                                val activeFocus = focusTap
+                                if (activeFocus != null && controlsState.canQuickEv && abs(pan.y) > 0.4f) {
+                                    val deltaEv = -pan.y / 210f
+                                    session.setQuickEv(controlsState.quickEvSteps + deltaEv)
+                                    evDragActive = true
+                                    focusTap = activeFocus.copy(token = System.nanoTime())
+                                }
+                            }
                         }
                     },
             ) {
+                drawAspectRatioMask(controlsState.aspectRatio)
                 drawCompositionGuides(presetSelection, showGrid)
                 drawCloseupFrames(frame.closeups)
                 drawCandidateBrackets(frame.candidates)
@@ -679,6 +884,34 @@ private fun ColumnScope.CameraScreen(
                 drawCircle(Color.White.copy(alpha = 0.9f), 2.5.dp.toPx(), mid)
             }
 
+            focusTap?.let { activeFocus ->
+                FocusEvOverlay(
+                    focus = activeFocus,
+                    viewWidthPx = viewfinderWidthPx,
+                    viewHeightPx = viewfinderHeightPx,
+                    evSteps = controlsState.quickEvSteps,
+                    minEv = controlsState.minEvSteps,
+                    maxEv = controlsState.maxEvSteps,
+                    canAdjustEv = controlsState.canQuickEv,
+                    evActive = evDragActive,
+                )
+            }
+
+            if (countdownRemaining > 0) {
+                CountdownOverlay(
+                    secondsRemaining = countdownRemaining,
+                    rotationDegrees = uiIconRotation,
+                )
+            }
+
+            if (shutterFlashAlpha > 0f) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(Color.Black.copy(alpha = shutterFlashAlpha)),
+                )
+            }
+
             // Single clean top-center frosted guidance pill + at most one secondary action/progress chip
             val primaryBanner = remember(
                 frame,
@@ -710,6 +943,20 @@ private fun ColumnScope.CameraScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                if (quickControlsOpen) {
+                    QuickControlsStrip(
+                        aspectRatio = controlsState.aspectRatio,
+                        timer = timerOption,
+                        onSelectAspectRatio = { nextRatio ->
+                            uiPrefs.edit().putString("aspect_ratio", nextRatio.wire).apply()
+                            session.setAspectRatio(nextRatio)
+                        },
+                        onSelectTimer = { nextTimer ->
+                            timerOption = nextTimer
+                            uiPrefs.edit().putString("timer_option", nextTimer.wire).apply()
+                        },
+                    )
+                }
                 primaryBanner?.let { banner ->
                     ViewfinderGuidancePill(banner = banner)
                 }
@@ -842,6 +1089,7 @@ private fun ColumnScope.CameraScreen(
                     modifier = Modifier.align(Alignment.BottomStart),
                 ) {
                     Column(
+                        modifier = Modifier.graphicsLayer { rotationZ = uiIconRotation },
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(1.dp),
                     ) {
@@ -876,6 +1124,7 @@ private fun ColumnScope.CameraScreen(
                     modifier = Modifier.align(Alignment.BottomEnd),
                 ) {
                     Column(
+                        modifier = Modifier.graphicsLayer { rotationZ = uiIconRotation },
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(1.dp),
                     ) {
@@ -965,20 +1214,22 @@ private fun ColumnScope.CameraScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.width(86.dp), contentAlignment = Alignment.CenterStart) {
-                LastPhotoThumbSlot(
-                    review = lastReview,
-                    onClick = {
-                        reviewBannerVisible = false
-                        reviewDialogOpen = true
-                    },
-                )
+                Box(Modifier.graphicsLayer { rotationZ = uiIconRotation }) {
+                    LastPhotoThumbSlot(
+                        review = lastReview,
+                        onClick = {
+                            reviewBannerVisible = false
+                            reviewDialogOpen = true
+                        },
+                    )
+                }
             }
 
             TactileShutterButton(
                 enabled = bound && !zoom.changing,
-                ready = frame.ready,
+                ready = frame.ready || countdownRemaining > 0,
                 autoShootProgress = if (autoShoot) autoShootProgress else 0f,
-                onClick = onShoot,
+                onClick = ::triggerShutter,
             )
 
             Box(Modifier.width(86.dp), contentAlignment = Alignment.CenterEnd) {

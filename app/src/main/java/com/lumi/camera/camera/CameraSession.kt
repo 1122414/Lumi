@@ -12,6 +12,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
+import android.view.Surface
 import android.view.View
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2Interop
@@ -98,6 +99,7 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 internal data class CandidateOverlay(
     val id: Int,
@@ -161,6 +163,7 @@ internal class CameraSession(
     private val onReference: (ReferenceUiState) -> Unit = {},
     private val onNativeProcessing: (NativeProcessingUiState) -> Unit = {},
     private val onFilter: (FilterUiState) -> Unit = {},
+    private val onControls: (CameraControlsUiState) -> Unit = {},
     initialProactivity: ProactivityMode = ProactivityMode.MANUAL,
     initialExposureMode: ExposureControlMode = ExposureControlMode.AUTO,
     initialNativeProcessing: NativeProcessingMode = NativeProcessingMode.NATIVE_AI,
@@ -168,6 +171,8 @@ internal class CameraSession(
     initialFilterPreset: FilterPreset = FilterPreset.ORIGINAL,
     initialFilterIntensity: Float = FilterAdjuster.DEFAULT_INTENSITY,
     initialFilterAiAdaptive: Boolean = true,
+    initialFlash: FlashOption = FlashOption.OFF,
+    initialAspectRatio: CaptureAspectRatio = CaptureAspectRatio.RATIO_3_4,
 ) : DefaultLifecycleObserver, DisplayManager.DisplayListener {
     private data class Binding(
         val size: Extent,
@@ -255,6 +260,11 @@ internal class CameraSession(
     private var previewFilterEffect: PreviewFilterEffect? = null
     private var exposureMode = initialExposureMode
     private var manualExposure = ManualExposureSettings()
+    private var quickEvSteps = 0f
+    private var flashOption = initialFlash
+    private var hasFlashUnit = false
+    private var aspectRatio = initialAspectRatio
+    private var deviceSurfaceRotation = Surface.ROTATION_0
     private var pendingAiExposure: AiExposureSuggestion? = null
     private var appliedAiExposure: AiExposureSuggestion? = null
     private var latestAiExposure: AiExposureSuggestion? = null
@@ -495,9 +505,16 @@ internal class CameraSession(
             analysis.setAnalyzer(worker, analyzer)
             binding = next.copy(extensionMode = actualExtensionMode)
             capture = photo
+            photo.targetRotation = deviceSurfaceRotation
+            hasFlashUnit = camera.cameraInfo.hasFlashUnit()
+            if (!hasFlashUnit && flashOption == FlashOption.TORCH) {
+                flashOption = FlashOption.OFF
+            }
+            applyFlashToHardware()
             applyExposureToHardware()
             publishExposureState()
             publishNativeProcessingState()
+            publishControlsState()
             refreshFilterState()
             val lensStops = rearZoomStops(context, camera.cameraInfo)
             val ranges = Observer<ZoomState> { range ->
@@ -1009,6 +1026,7 @@ internal class CameraSession(
         } else {
             applyExposureToHardware()
             publishExposureState()
+            publishControlsState()
         }
     }
 
@@ -1186,10 +1204,10 @@ internal class CameraSession(
     private fun applyExposureToHardware() {
         val cam = camera ?: return
         val effectiveSettings = when (exposureMode) {
-            ExposureControlMode.AUTO -> ManualExposureSettings()
+            ExposureControlMode.AUTO -> ManualExposureSettings(evSteps = quickEvSteps)
             ExposureControlMode.MANUAL -> manualExposure
             ExposureControlMode.AI_AUTO -> appliedAiExposure?.let { ExposureSolver.fromAiSuggestion(it, capabilities) }
-                ?: ManualExposureSettings()
+                ?: ManualExposureSettings(evSteps = quickEvSteps)
         }
         val baseline = readings.lastAutoExposure().takeIf { it.iso != null && it.shutterNs != null }
             ?: readings.latestExposure()
@@ -1251,6 +1269,80 @@ internal class CameraSession(
         }.onFailure { e ->
             Log.w("LumiCamera", "Unable to apply Camera2 exposure options", e)
         }
+    }
+
+    private fun applyFlashToHardware() {
+        val cam = camera ?: return
+        val photo = capture
+        if (!hasFlashUnit) {
+            photo?.flashMode = ImageCapture.FLASH_MODE_OFF
+            return
+        }
+        photo?.flashMode = flashOption.toImageCaptureFlashMode()
+        runCatching { cam.cameraControl.enableTorch(flashOption.usesTorch) }
+    }
+
+    private fun publishControlsState() {
+        onControls(
+            CameraControlsUiState(
+                flash = if (hasFlashUnit) flashOption else FlashOption.OFF,
+                hasFlash = hasFlashUnit,
+                aspectRatio = aspectRatio,
+                quickEvSteps = quickEvSteps,
+                minEvSteps = capabilities.minEv.coerceAtLeast(-2.5f),
+                maxEvSteps = capabilities.maxEv.coerceAtMost(2.5f),
+                canQuickEv = exposureMode != ExposureControlMode.MANUAL,
+            ),
+        )
+    }
+
+    fun cycleFlash(): FlashOption {
+        if (!hasFlashUnit) {
+            onMessage("当前镜头不支持闪光灯")
+            return FlashOption.OFF
+        }
+        flashOption = flashOption.next()
+        applyFlashToHardware()
+        publishControlsState()
+        return flashOption
+    }
+
+    fun setAspectRatio(next: CaptureAspectRatio) {
+        if (aspectRatio == next) return
+        aspectRatio = next
+        publishControlsState()
+    }
+
+    fun setDeviceOrientationDegrees(bucketDegrees: Int) {
+        val nextRotation = DeviceOrientationHelper.toSurfaceRotation(bucketDegrees)
+        if (deviceSurfaceRotation == nextRotation) return
+        deviceSurfaceRotation = nextRotation
+        capture?.targetRotation = nextRotation
+    }
+
+    fun focusAt(x: Float, y: Float): Boolean {
+        val cam = camera ?: return false
+        if (zoom.changing || view.width <= 0 || view.height <= 0) return false
+        focusOnPreviewPoint(x, y)
+        if (exposureMode != ExposureControlMode.MANUAL && quickEvSteps != 0f) {
+            quickEvSteps = 0f
+            runCatching { cam.cameraControl.setExposureCompensationIndex(0) }
+            publishControlsState()
+        }
+        return true
+    }
+
+    fun setQuickEv(evSteps: Float) {
+        val cam = camera ?: return
+        if (exposureMode == ExposureControlMode.MANUAL) return
+        val minEv = capabilities.minEv.coerceAtLeast(-2.5f)
+        val maxEv = capabilities.maxEv.coerceAtMost(2.5f)
+        val clamped = evSteps.coerceIn(minEv, maxEv)
+        quickEvSteps = clamped
+        val step = capabilities.evStep.takeIf { it > 0f } ?: (1f / 6f)
+        val idx = (clamped / step).roundToInt().coerceIn(capabilities.evIndexRange.first, capabilities.evIndexRange.last)
+        runCatching { cam.cameraControl.setExposureCompensationIndex(idx) }
+        publishControlsState()
     }
 
     fun tapSubject(x: Float, y: Float) {
@@ -1659,7 +1751,10 @@ internal class CameraSession(
         val captureFaceBox = latest?.faces?.maxByOrNull { (it.right - it.left) * (it.bottom - it.top) }
         val captureUnresolvedStep = run?.target?.stepDirection != null && latestStepProgress?.satisfied != true
         val activeGrade = filterState.resolvedGrade
+        val activeAspect = aspectRatio
         val frontMirror = lensFacing == CameraSelector.LENS_FACING_FRONT
+        photo.targetRotation = deviceSurfaceRotation
+        applyFlashToHardware()
 
         fun finishSaved(uri: Uri?) {
             if (disposed) return
@@ -1685,7 +1780,7 @@ internal class CameraSession(
             }
         }
 
-        if (!activeGrade.isIdentity) {
+        if (!activeGrade.isIdentity || activeAspect != CaptureAspectRatio.RATIO_3_4) {
             photo.takePicture(worker, object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     val rotationDeg = image.imageInfo.rotationDegrees
@@ -1702,6 +1797,7 @@ internal class CameraSession(
                             grade = activeGrade,
                             mirrorHorizontal = frontMirror,
                             fallbackRotationDegrees = rotationDeg,
+                            aspectRatio = activeAspect,
                         )
                     }.getOrNull()
                     main.execute {
@@ -1751,10 +1847,13 @@ internal class CameraSession(
     private fun releaseBinding() {
         zoomObserver?.let { camera?.cameraInfo?.zoomState?.removeObserver(it) }
         zoomObserver = null
+        runCatching { camera?.cameraControl?.enableTorch(false) }
         zoomGeneration++
         zoomSinceNs = 0L
         logZoomFrame = true
         camera = null
+        hasFlashUnit = false
+        quickEvSteps = 0f
         readings.reset()
         zoom = ViewfinderZoom()
         onZoom(zoom)
