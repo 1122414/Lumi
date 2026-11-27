@@ -1,6 +1,13 @@
 package com.lumi.camera.filter
 
 import com.lumi.camera.camera.LiveTelemetry
+import com.lumi.camera.guidance.Uv
+import com.lumi.camera.shotplan.ChatProtocol
+import com.lumi.camera.shotplan.CompositionPreset
+import com.lumi.camera.shotplan.PlanResult
+import com.lumi.camera.shotplan.Recommendation
+import com.lumi.camera.shotplan.SubjectCandidate
+import com.lumi.camera.vision.FaceBox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -116,5 +123,40 @@ class S6FilterAdjusterTest {
             telemetry = LiveTelemetry(),
         )
         assertEquals(-1.0f, state.resolvedGrade.saturation, 0.0001f)
+    }
+
+    @Test
+    fun `recommendation protocol parses optional filter suggestion and prompt includes filter guidance`() {
+        val prompt = ChatProtocol.promptFor(
+            preset = CompositionPreset.AUTO,
+            candidates = listOf(SubjectCandidate(1, "女孩", person = true, box = FaceBox(0.3, 0.2, 0.7, 0.8), seed = Uv(0.5, 0.5))),
+            requestFilterAdvice = true,
+            activeFilterPreset = null,
+        )
+        assertTrue(prompt.contains("\"filter\""))
+        assertTrue(prompt.contains("oxygen"))
+        assertTrue(prompt.contains("retro_ccd"))
+        assertTrue(prompt.contains("cool_film"))
+
+        val candidates = listOf(SubjectCandidate(1, "女孩", person = true, box = FaceBox(0.3, 0.2, 0.7, 0.8), seed = Uv(0.5, 0.5)))
+        val result = Recommendation.evaluateCandidate(
+            fields = mapOf(
+                "candidate" to 1,
+                "name" to "女孩",
+                "choice" to "left_third",
+                "reason" to "人物左三分留白",
+                "filter" to mapOf(
+                    "preset" to "oxygen",
+                    "delta" to mapOf("highlights" to -0.10, "shadows" to 0.12),
+                    "reason" to "晴天压高光更通透",
+                ),
+            ),
+            candidates = candidates,
+        )
+        assertTrue(result is PlanResult.Accepted)
+        val rec = (result as PlanResult.Accepted).value
+        assertNotNull(rec.filterSuggestion)
+        assertEquals(FilterPreset.OXYGEN, rec.filterSuggestion!!.preset)
+        assertEquals("晴天压高光更通透", rec.filterSuggestion!!.reason)
     }
 }

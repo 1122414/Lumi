@@ -1250,6 +1250,9 @@ internal class CameraSession(
         val preferencePrior = aestheticPrefs.read().promptPrior()
         val telemetrySummary = currentTelemetry(source).promptSummary(capabilities)
         val requestExposureAdvice = exposureMode != ExposureControlMode.AUTO
+        val requestFilterAdvice = filterMode == FilterSelectionMode.AI_SMART ||
+            (filterPreset != FilterPreset.ORIGINAL && filterAiAdaptive)
+        val capturedFilterPreset = if (filterMode == FilterSelectionMode.MANUAL) filterPreset else null
         val capturedRefRecipe = referenceState.recipe
         val capturedRefJpeg = referenceCompareJpeg
         onRecommendationStatus(
@@ -1278,6 +1281,7 @@ internal class CameraSession(
                         jpeg, capturedPreset, candidates, capturedZoomStops, capturedZoom,
                         preferencePrior, telemetrySummary, requestExposureAdvice,
                         capturedRefRecipe, capturedRefJpeg,
+                        requestFilterAdvice, capturedFilterPreset,
                     )
                 )
             } catch (e: Exception) { Result.failure(e) }
@@ -1385,6 +1389,11 @@ internal class CameraSession(
         } else if (pendingAiExposure != null) {
             pendingAiExposure = null
             publishExposureState()
+        }
+        val aiFilter = plan.filterSuggestion
+        if (aiFilter != null) {
+            aiFilterSuggestion = aiFilter
+            refreshFilterState()
         }
         // Automatically lock AF/AE focus and metering onto the chosen subject.
         val size = binding?.size

@@ -2,74 +2,117 @@ package com.lumi.camera.ui
 
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
-import androidx.camera.view.PreviewView
 import com.lumi.camera.BuildConfig
 import com.lumi.camera.camera.CameraPermissions
 import com.lumi.camera.camera.CameraSession
 import com.lumi.camera.camera.CandidateOverlay
 import com.lumi.camera.camera.ExposureControlMode
+import com.lumi.camera.camera.ExposureSolver
+import com.lumi.camera.camera.LiveTelemetry
 import com.lumi.camera.camera.NativeProcessingMode
 import com.lumi.camera.camera.NativeProcessingUiState
+import com.lumi.camera.camera.Point
 import com.lumi.camera.camera.Viewfinder
 import com.lumi.camera.camera.ViewfinderLens
 import com.lumi.camera.camera.ViewfinderZoom
-import com.lumi.camera.camera.Point
+import com.lumi.camera.filter.FilterAdjuster
+import com.lumi.camera.filter.FilterPreset
+import com.lumi.camera.filter.FilterSelectionMode
+import com.lumi.camera.filter.FilterUiState
 import com.lumi.camera.guidance.GuideEvidence
 import com.lumi.camera.guidance.PoseGuidance
 import com.lumi.camera.guidance.StepProgress
@@ -77,8 +120,6 @@ import com.lumi.camera.shotplan.CompositionChoice
 import com.lumi.camera.shotplan.CompositionDiagnostic
 import com.lumi.camera.shotplan.CompositionPreset
 import com.lumi.camera.shotplan.ConnectionResult
-import com.lumi.camera.shotplan.DirectorCategory
-import com.lumi.camera.shotplan.DirectorCue
 import com.lumi.camera.shotplan.ModelConfig
 import com.lumi.camera.shotplan.ModelConfigStore
 import com.lumi.camera.shotplan.PhotoQualityScore
@@ -90,12 +131,19 @@ import com.lumi.camera.vision.NormalizedCrop
 import com.lumi.camera.vision.PostShotRecrop
 import com.lumi.camera.vision.PostShotReview
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlinx.coroutines.delay
+
+private enum class BottomTray {
+    NONE,
+    FILTER,
+    EXPOSURE,
+}
 
 class MainActivity : ComponentActivity() {
     private var allowed by mutableStateOf(false)
@@ -116,28 +164,55 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requested = savedInstanceState?.getBoolean("requested") ?: false
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+        )
         setContent {
             val store = remember { ModelConfigStore(applicationContext) }
-            MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFFB3DBBE))) {
-                Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
-                    .safeDrawingPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
+            MaterialTheme(
+                colorScheme = darkColorScheme(
+                    primary = LumiColors.Ivory,
+                    onPrimary = LumiColors.IvoryInk,
+                    background = LumiColors.Obsidian,
+                    surface = LumiColors.SurfaceDark,
+                ),
+            ) {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .background(LumiColors.Obsidian)
+                        .safeDrawingPadding(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
                     if (allowed) {
                         val initial by produceState<ModelConfig?>(null, store) {
                             value = withContext(Dispatchers.IO) { store.read() }
                         }
                         initial?.let {
-                            CameraScreen(this@MainActivity, store, it, { session = it }, permissions::requestAlbum, ::notifyUser)
+                            CameraScreen(
+                                this@MainActivity,
+                                store,
+                                it,
+                                { session = it },
+                                permissions::requestAlbum,
+                                ::notifyUser,
+                            )
                         }
                     } else {
                         Spacer(Modifier.weight(1f))
-                        Text(if (requested) "没有相机权限，无法取景。" else "Lumi 需要相机权限来取景和拍照。",
-                            color = Color.White)
+                        Text(
+                            if (requested) "没有相机权限，无法取景。" else "Lumi 需要相机权限来取景和拍照。",
+                            color = LumiColors.TextPrimary,
+                        )
+                        Spacer(Modifier.height(12.dp))
                         Button(permissions::requestCamera) { Text("允许使用相机") }
                         if (requested) TextButton({
-                            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.fromParts("package", packageName, null)))
-                        }) { Text("打开系统设置") }
+                            startActivity(Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.fromParts("package", packageName, null),
+                            ))
+                        }) { Text("打开系统设置", color = LumiColors.Ivory) }
                         Spacer(Modifier.weight(1f))
                     }
                 }
@@ -154,9 +229,14 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStore, initial: ModelConfig,
+private fun ColumnScope.CameraScreen(
+    owner: MainActivity,
+    store: ModelConfigStore,
+    initial: ModelConfig,
     onSession: (CameraSession?) -> Unit,
-    onShoot: () -> Unit, onMessage: (String) -> Unit) {
+    onShoot: () -> Unit,
+    onMessage: (String) -> Unit,
+) {
     val context = LocalContext.current
     val hostView = LocalView.current
     val preview = remember(context) {
@@ -165,6 +245,10 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
+    val uiPrefs = remember(context) {
+        context.getSharedPreferences("lumi_ui_prefs", android.content.Context.MODE_PRIVATE)
+    }
+
     var frame by remember { mutableStateOf(Viewfinder()) }
     var paintRing by remember { mutableStateOf<Point?>(null) }
     var bound by remember { mutableStateOf(false) }
@@ -175,9 +259,14 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     var config by remember { mutableStateOf(initial) }
     val configured = remember(config) { config.validationError(BuildConfig.DEBUG) == null }
     var lastFailed by remember { mutableStateOf(store.lastFailed) }
-    var settingsOpen by remember { mutableStateOf(false) }
+
+    var modelSettingsOpen by remember { mutableStateOf(false) }
+    var cameraSettingsOpen by remember { mutableStateOf(false) }
+    var aiMenuOpen by remember { mutableStateOf(false) }
     var diagnosticOpen by remember { mutableStateOf(false) }
-    val uiPrefs = remember(context) { context.getSharedPreferences("lumi_ui_prefs", android.content.Context.MODE_PRIVATE) }
+    var activeTray by remember { mutableStateOf(BottomTray.NONE) }
+    var showGrid by remember { mutableStateOf(uiPrefs.getBoolean("show_grid", true)) }
+
     var proactivityMode by remember {
         mutableStateOf(ProactivityMode.fromWire(uiPrefs.getString("proactivity_mode", null)))
     }
@@ -187,8 +276,32 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     var nativeProcessingMode by remember {
         mutableStateOf(NativeProcessingMode.fromWire(uiPrefs.getString("native_processing_mode", null)))
     }
+    val initialFilterMode = remember {
+        FilterSelectionMode.fromWire(uiPrefs.getString("filter_mode", null))
+    }
+    val initialFilterPreset = remember {
+        FilterPreset.fromId(uiPrefs.getString("filter_preset", null)) ?: FilterPreset.ORIGINAL
+    }
+    val initialFilterIntensity = remember {
+        uiPrefs.getFloat("filter_intensity", FilterAdjuster.DEFAULT_INTENSITY).coerceIn(0f, 1f)
+    }
+    val initialFilterAiAdaptive = remember {
+        uiPrefs.getBoolean("filter_ai_adaptive", true)
+    }
+
     var nativeProcessingState by remember {
         mutableStateOf(NativeProcessingUiState(mode = nativeProcessingMode))
+    }
+    var filterState by remember {
+        mutableStateOf(
+            FilterUiState(
+                mode = initialFilterMode,
+                selectedPreset = initialFilterPreset,
+                intensity = initialFilterIntensity,
+                aiAdaptiveEnabled = initialFilterAiAdaptive,
+                resolvedPreset = initialFilterPreset,
+            ),
+        )
     }
     var exposureState by remember { mutableStateOf(ExposureUiState(mode = exposureMode)) }
     var referenceState by remember { mutableStateOf(ReferenceUiState()) }
@@ -200,18 +313,30 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     var autoShootProgress by remember { mutableFloatStateOf(0f) }
     var autoShotFired by remember { mutableStateOf(false) }
     var wasReady by remember { mutableStateOf(false) }
+
     fun setFailure(failed: Boolean) {
         if (lastFailed != failed) {
             store.lastFailed = failed
             lastFailed = failed
         }
     }
+
     val session = remember(preview, owner) {
-        CameraSession(preview, owner, { next ->
-            frame = next
-            if (next.ring != null || !next.hasTarget) paintRing = next.ring
-        }, { bound = it }, onMessage, { recommendationStatus = it }, config,
-            { setFailure(it != ConnectionResult.SUCCESS) }, { zoom = it }, { lens = it }, { presetSelection = it },
+        CameraSession(
+            preview,
+            owner,
+            { next ->
+                frame = next
+                if (next.ring != null || !next.hasTarget) paintRing = next.ring
+            },
+            { bound = it },
+            onMessage,
+            { recommendationStatus = it },
+            config,
+            { setFailure(it != ConnectionResult.SUCCESS) },
+            { zoom = it },
+            { lens = it },
+            { presetSelection = it },
             onCaptured = { review ->
                 lastReview = review
                 reviewBannerVisible = true
@@ -227,10 +352,19 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
                 nativeProcessingState = nextProc
                 nativeProcessingMode = nextProc.mode
             },
+            onFilter = { nextFilter ->
+                filterState = nextFilter
+            },
             initialProactivity = proactivityMode,
             initialExposureMode = exposureMode,
-            initialNativeProcessing = nativeProcessingMode)
+            initialNativeProcessing = nativeProcessingMode,
+            initialFilterMode = initialFilterMode,
+            initialFilterPreset = initialFilterPreset,
+            initialFilterIntensity = initialFilterIntensity,
+            initialFilterAiAdaptive = initialFilterAiAdaptive,
+        )
     }
+
     val pickReferenceLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
@@ -238,9 +372,10 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     }
     fun launchReferencePicker() {
         pickReferenceLauncher.launch(
-            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
         )
     }
+
     LaunchedEffect(lastReview?.capturedAtMs) {
         if (lastReview != null) {
             reviewBannerVisible = true
@@ -294,384 +429,597 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
         }
     }
     val showRing = frame.ring != null && !(frame.merged && settled)
-    val alpha by animateFloatAsState(if (showRing) 1f else 0f,
-        if (showRing) snap() else tween(120), label = "ring visibility")
-    Box(Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().padding(top = 48.dp, bottom = 160.dp), contentAlignment = Alignment.Center) {
-            Box(Modifier.aspectRatio(3f / 4f).background(Color.Black)) {
-                AndroidView({ preview }, Modifier.matchParentSize())
-                ReferenceOverlayLayer(
-                    state = referenceState,
-                    modifier = Modifier.matchParentSize(),
+    val ringAlpha by animateFloatAsState(
+        if (showRing) 1f else 0f,
+        if (showRing) snap() else tween(120),
+        label = "ring visibility",
+    )
+
+    val modelDotColor = when {
+        !configured -> LumiColors.Amber
+        lastFailed -> LumiColors.Danger
+        else -> LumiColors.Emerald
+    }
+    val modelStatusLabel = when {
+        !configured -> "未配置"
+        lastFailed -> "连接异常"
+        else -> "可用"
+    }
+
+    // 1. Minimalist Top Bar (Upright wordmark + status dot | Flip, Reference, AI mode, Settings)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(50.dp)
+            .padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(role = Role.Button) { modelSettingsOpen = true }
+                .padding(horizontal = 4.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Text(
+                text = "Lumi",
+                color = LumiColors.TextPrimary,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 0.4.sp,
+            )
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(modelDotColor),
+            )
+            if (nativeProcessingMode == NativeProcessingMode.PURE) {
+                Text(
+                    text = "纯净",
+                    color = LumiColors.Ivory.copy(alpha = 0.85f),
+                    fontSize = 10.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(LumiColors.IvoryMuted)
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
                 )
-                Canvas(
-                    Modifier
-                        .matchParentSize()
-                        .clipToBounds()
-                        .pointerInput(session) {
-                            detectTapGestures { offset -> session.tapSubject(offset.x, offset.y) }
-                        }
-                        .pointerInput(session) {
-                            detectTransformGestures { _, _, scale, _ -> if (scale != 1f) session.scaleZoom(scale) }
-                        }
+            }
+        }
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (lens.canSwitch) {
+                TopIconButton(
+                    description = if (lens.front) "切换到后置摄像头" else "切换到前置摄像头",
+                    enabled = bound && !zoom.changing,
+                    onClick = session::switchCamera,
                 ) {
-                    drawCompositionGuides(presetSelection)
-                    drawCandidateBrackets(frame.candidates)
-                    frame.tapPoint?.let { tap -> drawTapReticle(tap) }
-                    val points = frame.outline
-                    if (points.isNotEmpty()) {
-                        val path = Path()
-                        val gap = points.indexOf(null)
-                        var drawing = false
-                        for (i in points.indices) {
-                            val p = points[(i + gap + 1) % points.size]
-                            if (p == null) drawing = false
-                            else if (drawing) path.lineTo(p.x, p.y)
-                            else { path.moveTo(p.x, p.y); drawing = true }
-                        }
-                        if (gap == -1) path.close()
-                        drawPath(path, Color(0xFF46A9FF), style = Stroke(width = 2.dp.toPx(),
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()))))
-                    }
-                    val mid = center
-                    frame.rollDeg?.let { roll -> drawHorizonLevel(mid, roll) }
-                    paintRing?.takeIf { alpha > 0f }?.let {
-                        val dx = it.x - mid.x
-                        val dy = it.y - mid.y
-                        val radius = 11.dp.toPx()
-                        val inset = radius + 3.dp.toPx()
-                        // An off-screen projection meets the border along the same line.
-                        val scaleX = if (dx == 0f) 1f else (mid.x - inset) / abs(dx)
-                        val scaleY = if (dy == 0f) 1f else (mid.y - inset) / abs(dy)
-                        val scale = minOf(1f, scaleX, scaleY).coerceAtLeast(0f)
-                        val ring = Offset(mid.x + dx * scale, mid.y + dy * scale)
-                        val green = Color(0xFF38DF85)
-                        drawLine(green, mid, ring, 1.5.dp.toPx(), alpha = alpha)
-                        drawCircle(green, radius, ring, alpha = alpha, style = Stroke(2.5.dp.toPx()))
-                    }
-                    if (autoShoot && autoShootProgress > 0f && autoShootProgress < 1f) {
-                        val arcRadius = 17.dp.toPx()
-                        drawArc(
-                            color = Color(0xFF38DF85),
-                            startAngle = -90f,
-                            sweepAngle = 360f * autoShootProgress,
-                            useCenter = false,
-                            topLeft = Offset(mid.x - arcRadius, mid.y - arcRadius),
-                            size = Size(arcRadius * 2f, arcRadius * 2f),
-                            style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round),
+                    LensFlipIcon(
+                        tint = if (bound && !zoom.changing) LumiColors.TextPrimary else LumiColors.TextMuted,
+                    )
+                }
+            }
+
+            TopIconButton(
+                description = "导入或管理参考图",
+                active = referenceState.hasReference,
+                onClick = {
+                    if (referenceState.hasReference) referenceDialogOpen = true
+                    else launchReferencePicker()
+                },
+            ) {
+                ReferenceFrameIcon(
+                    tint = if (referenceState.hasReference) LumiColors.Ivory else LumiColors.TextPrimary,
+                )
+            }
+
+            Box {
+                val aiHighlighted = proactivityMode == ProactivityMode.PROACTIVE || autoShoot
+                TopIconButton(
+                    description = "AI 主动程度与自动拍",
+                    active = aiHighlighted,
+                    onClick = { aiMenuOpen = true },
+                ) {
+                    AiModeReticleIcon(
+                        tint = when {
+                            autoShoot -> LumiColors.Emerald
+                            proactivityMode == ProactivityMode.PROACTIVE -> LumiColors.Ivory
+                            proactivityMode == ProactivityMode.QUIET -> LumiColors.TextMuted
+                            else -> LumiColors.TextPrimary
+                        },
+                    )
+                }
+                DropdownMenu(
+                    expanded = aiMenuOpen,
+                    onDismissRequest = { aiMenuOpen = false },
+                    containerColor = LumiColors.SurfaceDark,
+                ) {
+                    ProactivityMode.entries.forEach { mode ->
+                        val selected = proactivityMode == mode
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = buildString {
+                                        append(if (selected) "✓ " else "   ")
+                                        append("AI ${mode.label}模式")
+                                        append(
+                                            when (mode) {
+                                                ProactivityMode.PROACTIVE -> "（停稳自动分析）"
+                                                ProactivityMode.MANUAL -> "（点按触发）"
+                                                ProactivityMode.QUIET -> "（仅水平仪）"
+                                            },
+                                        )
+                                    },
+                                    color = if (selected) LumiColors.Ivory else LumiColors.TextPrimary,
+                                    fontSize = 13.sp,
+                                )
+                            },
+                            onClick = {
+                                aiMenuOpen = false
+                                proactivityMode = mode
+                                uiPrefs.edit().putString("proactivity_mode", mode.wire).apply()
+                                session.setProactivityMode(mode)
+                            },
                         )
                     }
-                    drawCircle(Color.White, 3.dp.toPx(), mid)
-                }
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(
-                            top = 10.dp,
-                            start = 12.dp,
-                            end = if (referenceState.hasReference) 74.dp else 12.dp,
-                        ),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    frame.suggestedZoom?.let { targetZoom ->
-                        Surface(
-                            onClick = session::applySuggestedZoom,
-                            shape = RoundedCornerShape(18.dp),
-                            color = Color(0xCC102016),
-                            border = BorderStroke(1.dp, Color(0xFF38DF85)),
-                        ) {
+                    HorizontalDivider(color = LumiColors.Hairline)
+                    DropdownMenuItem(
+                        text = {
                             Text(
-                                text = "建议切至 ${SubjectCandidates.formatZoomLabel(targetZoom)}",
-                                color = Color(0xFF38DF85),
+                                text = if (autoShoot) "✓ 到位自动快门 · 已开启" else "   到位自动快门 · 关闭",
+                                color = if (autoShoot) LumiColors.Emerald else LumiColors.TextPrimary,
                                 fontSize = 13.sp,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                             )
-                        }
-                    }
-                    frame.directorCue?.let { cue ->
-                        DirectorCuePill(cue)
-                    }
-                    frame.stepProgress?.let { step ->
-                        StepProgressPill(step)
-                    }
-                    frame.referenceGuidance?.let { refGuide ->
-                        ReferenceCoachBanner(refGuide)
-                    }
-                    AiExposureActionPill(
-                        state = exposureState,
-                        onApplyPending = session::applyPendingAiExposure,
-                        onRevertApplied = session::revertAiExposure,
-                    )
-                }
-                if (referenceState.hasReference) {
-                    ReferenceThumbnailDock(
-                        state = referenceState,
-                        onToggleOverlay = session::toggleReferenceOverlay,
-                        onOpenSheet = { referenceDialogOpen = true },
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(end = 8.dp, top = 8.dp),
-                    )
-                }
-                if (exposureState.mode == ExposureControlMode.AI_AUTO) {
-                    val hud = exposureState.telemetry.hudSummary()
-                    if (hud.isNotEmpty()) {
-                        Box(
-                            Modifier
-                                .align(Alignment.TopStart)
-                                .padding(start = 8.dp, top = 8.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0x99101513))
-                                .padding(horizontal = 7.dp, vertical = 3.dp),
-                        ) {
-                            Text(hud, color = Color(0xFFB3DBBE), fontSize = 9.sp, maxLines = 1)
-                        }
-                    }
-                }
-                val bannerReview = lastReview
-                if (reviewBannerVisible && bannerReview != null) {
-                    Surface(
-                        onClick = {
-                            reviewBannerVisible = false
-                            reviewDialogOpen = true
                         },
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color(0xD9161B18),
-                        border = BorderStroke(1.dp, Color(0x99B3DBBE)),
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = if (exposureState.mode == ExposureControlMode.MANUAL) 142.dp else if (bound && zoom.max > zoom.min) 52.dp else 12.dp, start = 14.dp, end = 14.dp),
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                text = bannerReview.summary,
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
-                            )
-                            Text(
-                                text = "二次构图 ›",
-                                color = Color(0xFF38DF85),
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                            )
-                        }
-                    }
-                }
-                if (exposureState.mode == ExposureControlMode.MANUAL) {
-                    ManualExposurePanel(
-                        state = exposureState,
-                        onUpdateManual = session::updateManualExposure,
-                        onApplyAiToManual = session::applyLatestAiToManual,
-                        onResetManual = session::resetManualExposure,
-                        modifier = Modifier.align(Alignment.BottomCenter),
+                        onClick = {
+                            aiMenuOpen = false
+                            autoShoot = !autoShoot
+                            onMessage(if (autoShoot) "已开启到位自动快门" else "已关闭自动快门")
+                        },
                     )
-                } else if (bound && zoom.max > zoom.min) {
-                    ZoomWheel(zoom, session::setZoom, Modifier.align(Alignment.BottomCenter))
                 }
+            }
+
+            TopIconButton(
+                description = "相机设置",
+                onClick = { cameraSettingsOpen = true },
+            ) {
+                SettingsHexIcon(tint = LumiColors.TextPrimary)
             }
         }
-        Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Lumi", color = Color.White, fontSize = 14.sp)
-            TextButton(
-                onClick = { settingsOpen = true },
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-            ) {
-                Text("模型", fontSize = 12.sp)
-                Spacer(Modifier.width(4.dp))
-                Text(config.safeText(config.model), Modifier.weight(1f), color = Color.White, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, fontSize = 11.sp)
-                Text(when {
-                    !configured -> "未配置"
-                    lastFailed -> "失败"
-                    else -> "可用"
-                }, fontSize = 11.sp)
-            }
-            Box(
+    }
+
+    // 2. 3:4 Live Viewfinder Hero
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .weight(1f),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(3f / 4f)
+                .background(Color.Black),
+        ) {
+            AndroidView({ preview }, Modifier.matchParentSize())
+
+            ReferenceOverlayLayer(
+                state = referenceState,
+                modifier = Modifier.matchParentSize(),
+            )
+
+            Canvas(
                 Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(
-                        when (exposureMode) {
-                            ExposureControlMode.AI_AUTO -> Color(0xFFFFD54F)
-                            ExposureControlMode.MANUAL -> Color(0xFF38DF85)
-                            ExposureControlMode.AUTO -> Color(0x2EFFFFFF)
+                    .matchParentSize()
+                    .clipToBounds()
+                    .pointerInput(session) {
+                        detectTapGestures { offset ->
+                            if (activeTray != BottomTray.NONE) {
+                                activeTray = BottomTray.NONE
+                            }
+                            session.tapSubject(offset.x, offset.y)
                         }
-                    )
-                    .clickable(role = Role.Button) {
-                        val next = exposureMode.next()
-                        exposureMode = next
-                        uiPrefs.edit().putString("exposure_mode", next.wire).apply()
-                        session.setExposureMode(next)
-                        onMessage(when (next) {
-                            ExposureControlMode.AUTO -> "曝光自动：系统默认测光"
-                            ExposureControlMode.AI_AUTO -> "AI自动挡：结合实时光影测光给出参数"
-                            ExposureControlMode.MANUAL -> "M手动挡：EV / ISO / 快门 / 色温（单项支持 AUTO）"
-                        })
                     }
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = exposureMode.label,
-                    color = if (exposureMode == ExposureControlMode.AUTO) Color(0xFFE0E5E2) else Color(0xFF102016),
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                )
-            }
-            Spacer(Modifier.width(5.dp))
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(
-                        when (proactivityMode) {
-                            ProactivityMode.PROACTIVE -> Color(0xFF4FC3F7)
-                            ProactivityMode.QUIET -> Color(0x22FFFFFF)
-                            ProactivityMode.MANUAL -> Color(0x2EFFFFFF)
-                        }
-                    )
-                    .clickable(role = Role.Button) {
-                        val next = proactivityMode.next()
-                        proactivityMode = next
-                        uiPrefs.edit().putString("proactivity_mode", next.wire).apply()
-                        session.setProactivityMode(next)
-                        onMessage(when (next) {
-                            ProactivityMode.PROACTIVE -> "主动模式：停稳或画面异常时自动分析"
-                            ProactivityMode.QUIET -> "安静模式：仅保留水平仪与手动辅助线"
-                            ProactivityMode.MANUAL -> "手动模式：点击推荐或轻点主体触发"
-                        })
-                    }
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = proactivityMode.label,
-                    color = if (proactivityMode == ProactivityMode.PROACTIVE) Color(0xFF0A1C24) else Color(0xFFE0E5E2),
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                )
-            }
-            Spacer(Modifier.width(6.dp))
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (autoShoot) Color(0xFF38DF85) else Color(0x2EFFFFFF))
-                    .clickable(role = Role.Switch) { autoShoot = !autoShoot }
-                    .padding(horizontal = 9.dp, vertical = 4.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = if (autoShoot) "自动拍·开" else "自动拍",
-                    color = if (autoShoot) Color(0xFF102016) else Color(0xFFE0E5E2),
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                )
-            }
-            if (BuildConfig.DEBUG) Box {
-                var debugMenuOpen by remember { mutableStateOf(false) }
-                TextButton(onClick = { debugMenuOpen = true }) { Text("调试", fontSize = 12.sp) }
-                DropdownMenu(expanded = debugMenuOpen, onDismissRequest = { debugMenuOpen = false }) {
-                    DropdownMenuItem(
-                        text = { Text("记住这个构图") },
-                        enabled = bound && frame.canRemember,
-                        onClick = {
-                            debugMenuOpen = false
-                            session.rememberComposition()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("查看上次推荐诊断") },
-                        onClick = {
-                            debugMenuOpen = false
-                            diagnosticOpen = true
-                        }
-                    )
-                }
-            }
-        }
-        Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                frame.reason?.let { Text(it, color = Color.White, fontSize = 15.sp, maxLines = 1) }
-                val rollWarn = frame.rollDeg?.let { abs(it) > PoseGuidance.READY_MAX_ROLL_DEG } == true
-                val pendingSuggestedZoom = frame.suggestedZoom
-                val pendingStep = frame.stepProgress?.takeIf { !it.satisfied }
-                Text(when {
-                    frame.ready && pendingSuggestedZoom != null ->
-                        "已对齐 · 建议切至 ${SubjectCandidates.formatZoomLabel(pendingSuggestedZoom)}（或手动拍）"
-                    frame.ready && pendingStep != null ->
-                        "构图已对齐 · ${pendingStep.direction.arrow} ${pendingStep.direction.label}更干净"
-                    frame.ready && autoShoot && !autoShotFired -> "停稳自动拍摄中…"
-                    frame.ready -> "可以拍"
-                    !bound -> if (lens.front) "正在打开前置相机" else "正在打开后置相机"
-                    recommendationStatus != null -> recommendationStatus.orEmpty()
-                    frame.viewpointDrifted -> "视角已偏离，请回到推荐仰俯角"
-                    frame.evidence == GuideEvidence.RETURN_DIRECTION -> "返回原构图"
-                    frame.hasTarget && frame.ring == null -> "正在寻找原主体"
-                    frame.hasTarget && rollWarn -> "构图引导中 · 调平画面"
-                    frame.hasTarget -> "构图引导中"
-                    proactivityMode == ProactivityMode.QUIET -> "安静模式 · 仅水平仪与辅助线"
-                    proactivityMode == ProactivityMode.PROACTIVE -> "主动模式 · 停稳画面自动推荐构图"
-                    else -> "轻点主体或点击推荐构图"
-                }, color = Color.White, fontSize = 13.sp)
-            }
-            PresetPillBar(presetSelection, onSelect = session::selectPreset)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                lastReview?.let { review ->
-                    LastPhotoThumb(review = review, onClick = {
-                        reviewBannerVisible = false
-                        reviewDialogOpen = true
-                    })
-                }
-                ReferencePickerChip(
-                    hasReference = referenceState.hasReference,
-                    overlayEnabled = referenceState.overlayEnabled,
-                    onClick = {
-                        if (referenceState.hasReference) {
-                            referenceDialogOpen = true
-                        } else {
-                            launchReferencePicker()
+                    .pointerInput(session) {
+                        detectTransformGestures { _, _, scale, _ ->
+                            if (scale != 1f) session.scaleZoom(scale)
                         }
                     },
-                )
-                Button(
-                    session::recommend,
-                    enabled = bound && !zoom.changing && configured && proactivityMode != ProactivityMode.QUIET,
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                ) { Text("推荐构图") }
-                OutlinedButton(
-                    onShoot,
-                    enabled = bound && !zoom.changing,
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                ) { Text("拍照") }
-                if (lens.canSwitch) {
-                    CameraFlipButton(
-                        front = lens.front,
-                        enabled = bound && !zoom.changing,
-                        onClick = session::switchCamera,
+            ) {
+                drawCompositionGuides(presetSelection, showGrid)
+                drawCandidateBrackets(frame.candidates)
+                frame.tapPoint?.let { tap -> drawTapReticle(tap) }
+                val points = frame.outline
+                if (points.isNotEmpty()) {
+                    val path = Path()
+                    val gap = points.indexOf(null)
+                    var drawing = false
+                    for (i in points.indices) {
+                        val p = points[(i + gap + 1) % points.size]
+                        if (p == null) drawing = false
+                        else if (drawing) path.lineTo(p.x, p.y)
+                        else {
+                            path.moveTo(p.x, p.y)
+                            drawing = true
+                        }
+                    }
+                    if (gap == -1) path.close()
+                    drawPath(
+                        path,
+                        LumiColors.Emerald.copy(alpha = 0.72f),
+                        style = Stroke(
+                            width = 1.6.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx())),
+                        ),
                     )
+                }
+                val mid = center
+                frame.rollDeg?.let { roll -> drawHorizonLevel(mid, roll) }
+                paintRing?.takeIf { ringAlpha > 0f }?.let {
+                    val dx = it.x - mid.x
+                    val dy = it.y - mid.y
+                    val radius = 11.dp.toPx()
+                    val inset = radius + 3.dp.toPx()
+                    val scaleX = if (dx == 0f) 1f else (mid.x - inset) / abs(dx)
+                    val scaleY = if (dy == 0f) 1f else (mid.y - inset) / abs(dy)
+                    val scale = minOf(1f, scaleX, scaleY).coerceAtLeast(0f)
+                    val ring = Offset(mid.x + dx * scale, mid.y + dy * scale)
+                    val green = LumiColors.Emerald
+                    drawLine(green, mid, ring, 1.4.dp.toPx(), alpha = ringAlpha)
+                    drawCircle(green, radius, ring, alpha = ringAlpha, style = Stroke(2.2.dp.toPx()))
+                }
+                drawCircle(Color.White.copy(alpha = 0.9f), 2.5.dp.toPx(), mid)
+            }
+
+            // Single clean top-center frosted guidance pill + optional actionable chip
+            val primaryBanner = remember(
+                frame,
+                bound,
+                lens.front,
+                recommendationStatus,
+                autoShoot,
+                autoShotFired,
+                proactivityMode,
+                filterState.reason,
+            ) {
+                resolveGuidanceBanner(
+                    frame = frame,
+                    bound = bound,
+                    front = lens.front,
+                    recommendationStatus = recommendationStatus,
+                    autoShoot = autoShoot,
+                    autoShotFired = autoShotFired,
+                    proactivityMode = proactivityMode,
+                    filterReason = filterState.reason,
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(
+                        top = 12.dp,
+                        start = 16.dp,
+                        end = if (referenceState.hasReference) 74.dp else 16.dp,
+                    ),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                primaryBanner?.let { banner ->
+                    ViewfinderGuidancePill(banner = banner)
+                }
+                frame.suggestedZoom?.let { targetZoom ->
+                    Surface(
+                        onClick = session::applySuggestedZoom,
+                        shape = RoundedCornerShape(18.dp),
+                        color = LumiColors.GlassDark,
+                        border = BorderStroke(1.dp, LumiColors.Ivory),
+                    ) {
+                        Text(
+                            text = "建议切至 ${SubjectCandidates.formatZoomLabel(targetZoom)} ›",
+                            color = LumiColors.Ivory,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                        )
+                    }
+                }
+                frame.stepProgress?.let { step ->
+                    StepProgressPill(step)
+                }
+                frame.referenceGuidance?.let { refGuide ->
+                    ReferenceCoachBanner(refGuide)
+                }
+                AiExposureActionPill(
+                    state = exposureState,
+                    onApplyPending = session::applyPendingAiExposure,
+                    onRevertApplied = session::revertAiExposure,
+                )
+            }
+
+            if (referenceState.hasReference) {
+                ReferenceThumbnailDock(
+                    state = referenceState,
+                    onToggleOverlay = session::toggleReferenceOverlay,
+                    onOpenSheet = { referenceDialogOpen = true },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(end = 10.dp, top = 10.dp),
+                )
+            }
+
+            val bannerReview = lastReview
+            if (reviewBannerVisible && bannerReview != null) {
+                Surface(
+                    onClick = {
+                        reviewBannerVisible = false
+                        reviewDialogOpen = true
+                    },
+                    shape = RoundedCornerShape(18.dp),
+                    color = LumiColors.GlassDark,
+                    border = BorderStroke(1.dp, LumiColors.Ivory.copy(alpha = 0.7f)),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 66.dp, start = 16.dp, end = 16.dp),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = bannerReview.summary,
+                            color = LumiColors.TextPrimary,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Text(
+                            text = "精裁 ›",
+                            color = LumiColors.Ivory,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+
+            // Bottom 3-point overlay inside viewfinder: Filter (left) | Compact Zoom (center) | Exposure ± (right)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
+                val filterActive = activeTray == BottomTray.FILTER || filterState.isActive
+                ViewfinderCornerCircle(
+                    active = filterActive,
+                    description = "滤镜与环境调色",
+                    onClick = {
+                        activeTray = if (activeTray == BottomTray.FILTER) BottomTray.NONE else BottomTray.FILTER
+                    },
+                    modifier = Modifier.align(Alignment.BottomStart),
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(1.dp),
+                    ) {
+                        FilterRingsIcon(
+                            tint = if (filterActive) LumiColors.Ivory else LumiColors.TextPrimary,
+                            size = 17.dp,
+                        )
+                        Text(
+                            text = filterState.badgeLabel,
+                            color = if (filterActive) LumiColors.Ivory else LumiColors.TextSecondary,
+                            fontSize = 8.sp,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
+                if (bound && zoom.max > zoom.min) {
+                    ZoomWheel(
+                        zoom = zoom,
+                        select = session::setZoom,
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                }
+
+                val exposureActive = activeTray == BottomTray.EXPOSURE || exposureMode != ExposureControlMode.AUTO
+                ViewfinderCornerCircle(
+                    active = exposureActive,
+                    description = "曝光与 M 手动挡",
+                    onClick = {
+                        activeTray = if (activeTray == BottomTray.EXPOSURE) BottomTray.NONE else BottomTray.EXPOSURE
+                    },
+                    modifier = Modifier.align(Alignment.BottomEnd),
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(1.dp),
+                    ) {
+                        ExposurePlusMinusIcon(
+                            tint = if (exposureActive) LumiColors.Ivory else LumiColors.TextPrimary,
+                            size = 17.dp,
+                        )
+                        val expBadge = when (exposureMode) {
+                            ExposureControlMode.AUTO -> null
+                            ExposureControlMode.AI_AUTO -> "AI"
+                            ExposureControlMode.MANUAL -> "M"
+                        }
+                        if (expBadge != null) {
+                            Text(
+                                text = expBadge,
+                                color = LumiColors.Ivory,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
             }
         }
     }
-    if (settingsOpen) ModelSettingsDialog(config, store, onDismiss = { settingsOpen = false },
-        onTested = { draft, result -> if (draft == config) setFailure(result != ConnectionResult.SUCCESS) },
-        onSaved = { saved, result ->
-            setFailure(result?.let { it != ConnectionResult.SUCCESS } ?: (saved == config && lastFailed))
-            session.useModelConfig(saved)
-            config = saved
-            settingsOpen = false
-        })
-    if (diagnosticOpen && BuildConfig.DEBUG) DiagnosticDialog(onDismiss = { diagnosticOpen = false })
+
+    // 3. Bottom Control Deck (Obsidian black, mutually exclusive tray + symmetrical shutter row per 摆法 1)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(LumiColors.Obsidian)
+            .padding(top = 6.dp, bottom = 14.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        when (activeTray) {
+            BottomTray.FILTER -> {
+                FilterBar(
+                    state = filterState,
+                    onSelectAiSmart = {
+                        uiPrefs.edit().putString("filter_mode", FilterSelectionMode.AI_SMART.wire).apply()
+                        session.selectAiSmartFilter()
+                    },
+                    onSelectPreset = { preset ->
+                        uiPrefs.edit()
+                            .putString("filter_mode", FilterSelectionMode.MANUAL.wire)
+                            .putString("filter_preset", preset.id)
+                            .apply()
+                        session.selectFilterPreset(preset)
+                    },
+                    onIntensityChange = { value ->
+                        uiPrefs.edit().putFloat("filter_intensity", value).apply()
+                        session.setFilterIntensity(value)
+                    },
+                    onToggleAiAdaptive = { enabled ->
+                        uiPrefs.edit().putBoolean("filter_ai_adaptive", enabled).apply()
+                        session.setFilterAiAdaptive(enabled)
+                    },
+                )
+            }
+            BottomTray.EXPOSURE -> {
+                ManualExposurePanel(
+                    state = exposureState,
+                    onSelectMode = { next ->
+                        exposureMode = next
+                        uiPrefs.edit().putString("exposure_mode", next.wire).apply()
+                        session.setExposureMode(next)
+                    },
+                    onUpdateManual = session::updateManualExposure,
+                    onApplyAiToManual = session::applyLatestAiToManual,
+                    onResetManual = session::resetManualExposure,
+                )
+            }
+            BottomTray.NONE -> {
+                MinimalPresetTabRow(presetSelection, onSelect = session::selectPreset)
+                TelemetryStrip(telemetry = exposureState.telemetry)
+            }
+        }
+
+        // Main Shutter Row (摆法 1: Left Recent Photo Thumb | Center Tactile Shutter | Right "AI 构图")
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 28.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.width(78.dp), contentAlignment = Alignment.CenterStart) {
+                LastPhotoThumbSlot(
+                    review = lastReview,
+                    onClick = {
+                        reviewBannerVisible = false
+                        reviewDialogOpen = true
+                    },
+                )
+            }
+
+            TactileShutterButton(
+                enabled = bound && !zoom.changing,
+                ready = frame.ready,
+                autoShootProgress = if (autoShoot) autoShootProgress else 0f,
+                onClick = onShoot,
+            )
+
+            Box(Modifier.width(78.dp), contentAlignment = Alignment.CenterEnd) {
+                val aiEnabled = bound && !zoom.changing && configured && proactivityMode != ProactivityMode.QUIET
+                Surface(
+                    onClick = session::recommend,
+                    enabled = aiEnabled,
+                    shape = RoundedCornerShape(22.dp),
+                    color = if (aiEnabled) LumiColors.GlassSubtle else Color(0x12FFFFFF),
+                    border = BorderStroke(
+                        width = 1.2.dp,
+                        color = if (aiEnabled) LumiColors.Ivory else LumiColors.Hairline,
+                    ),
+                    modifier = Modifier.height(40.dp),
+                ) {
+                    Box(
+                        modifier = Modifier.padding(horizontal = 14.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "AI 构图",
+                            color = if (aiEnabled) LumiColors.Ivory else LumiColors.TextMuted,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // Dialogs & Sheets
+    if (cameraSettingsOpen) {
+        CameraSettingsDialog(
+            nativeProcessingState = nativeProcessingState,
+            showGrid = showGrid,
+            modelSummary = config.safeText(config.model).ifBlank { "尚未填写模型" },
+            modelStatusLabel = modelStatusLabel,
+            modelStatusColor = modelDotColor,
+            preferenceSummary = session.preferenceSummary(),
+            canRememberComposition = bound && frame.canRemember,
+            onSetNativeProcessing = { mode ->
+                nativeProcessingMode = mode
+                uiPrefs.edit().putString("native_processing_mode", mode.wire).apply()
+                session.setNativeProcessingMode(mode)
+            },
+            onToggleGrid = { enabled ->
+                showGrid = enabled
+                uiPrefs.edit().putBoolean("show_grid", enabled).apply()
+            },
+            onOpenModelSettings = { modelSettingsOpen = true },
+            onResetPreferences = session::resetPreferences,
+            onRememberComposition = session::rememberComposition,
+            onOpenDiagnostics = { diagnosticOpen = true },
+            onDismiss = { cameraSettingsOpen = false },
+        )
+    }
+    if (modelSettingsOpen) {
+        ModelSettingsDialog(
+            config,
+            store,
+            onDismiss = { modelSettingsOpen = false },
+            onTested = { draft, result -> if (draft == config) setFailure(result != ConnectionResult.SUCCESS) },
+            onSaved = { saved, result ->
+                setFailure(result?.let { it != ConnectionResult.SUCCESS } ?: (saved == config && lastFailed))
+                session.useModelConfig(saved)
+                config = saved
+                modelSettingsOpen = false
+            },
+        )
+    }
+    if (diagnosticOpen && BuildConfig.DEBUG) {
+        DiagnosticDialog(onDismiss = { diagnosticOpen = false })
+    }
     val activeReview = lastReview
     if (reviewDialogOpen && activeReview != null) {
         PostShotReviewDialog(
@@ -699,6 +1047,312 @@ private fun ColumnScope.CameraScreen(owner: MainActivity, store: ModelConfigStor
     }
 }
 
+private data class GuidanceBanner(
+    val text: String,
+    val ready: Boolean = false,
+    val subtle: Boolean = false,
+)
+
+private fun resolveGuidanceBanner(
+    frame: Viewfinder,
+    bound: Boolean,
+    front: Boolean,
+    recommendationStatus: String?,
+    autoShoot: Boolean,
+    autoShotFired: Boolean,
+    proactivityMode: ProactivityMode,
+    filterReason: String?,
+): GuidanceBanner? {
+    val rollWarn = frame.rollDeg?.let { abs(it) > PoseGuidance.READY_MAX_ROLL_DEG } == true
+    val pendingStep = frame.stepProgress?.takeIf { !it.satisfied }
+    return when {
+        !bound -> GuidanceBanner(if (front) "正在打开前置相机" else "正在打开后置相机", subtle = true)
+        recommendationStatus != null -> GuidanceBanner(recommendationStatus)
+        frame.ready && autoShoot && !autoShotFired -> GuidanceBanner("构图就绪 · 自动拍摄中", ready = true)
+        frame.ready && pendingStep != null -> GuidanceBanner("构图已对齐 · ${pendingStep.direction.label}更干净", ready = true)
+        frame.ready -> GuidanceBanner(
+            text = frame.reason?.let { "构图就绪 · $it" } ?: "构图就绪 · 可以拍",
+            ready = true,
+        )
+        frame.viewpointDrifted -> GuidanceBanner("视角已偏离，请回到推荐仰俯角")
+        frame.evidence == GuideEvidence.RETURN_DIRECTION -> GuidanceBanner("返回推荐构图方向")
+        frame.hasTarget && frame.ring == null -> GuidanceBanner("正在找回主体")
+        frame.hasTarget && rollWarn -> GuidanceBanner(frame.reason?.let { "$it · 调平画面" } ?: "轻轻调平画面")
+        frame.directorCue != null -> GuidanceBanner("${frame.directorCue.category.badge} · ${frame.directorCue.tip}")
+        frame.reason != null -> GuidanceBanner(frame.reason)
+        filterReason != null -> GuidanceBanner(filterReason, subtle = true)
+        proactivityMode == ProactivityMode.QUIET -> null
+        else -> null
+    }
+}
+
+@Composable
+private fun ViewfinderGuidancePill(banner: GuidanceBanner) {
+    val borderColor = when {
+        banner.ready -> LumiColors.Emerald.copy(alpha = 0.72f)
+        banner.subtle -> LumiColors.Hairline
+        else -> LumiColors.HairlineStrong
+    }
+    val dotColor = if (banner.ready) LumiColors.Emerald else LumiColors.Ivory
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = LumiColors.GlassDark,
+        border = BorderStroke(1.dp, borderColor),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (banner.ready) {
+                Text("✓", color = LumiColors.Emerald, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .border(1.2.dp, dotColor, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .size(3.5.dp)
+                            .clip(CircleShape)
+                            .background(dotColor),
+                    )
+                }
+            }
+            Text(
+                text = banner.text,
+                color = LumiColors.TextPrimary,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TopIconButton(
+    description: String,
+    active: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .background(if (active) Color(0x1AF2E6C9) else Color.Transparent)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun ViewfinderCornerCircle(
+    active: Boolean,
+    description: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = LumiColors.GlassDark,
+        border = BorderStroke(1.dp, if (active) LumiColors.Ivory else LumiColors.Hairline),
+        modifier = modifier
+            .size(46.dp)
+            .semantics { contentDescription = description },
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun MinimalPresetTabRow(selection: PresetSelection, onSelect: (CompositionPreset) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CompositionPreset.entries.forEach { preset ->
+            val selected = selection.preset == preset
+            val text = when {
+                preset == CompositionPreset.RULE_OF_THIRDS && selected ->
+                    if (selection.thirdChoice == CompositionChoice.LEFT_THIRD) "三分·左" else "三分·右"
+                else -> preset.label
+            }
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(role = Role.RadioButton) { onSelect(preset) }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    text = text,
+                    color = if (selected) LumiColors.TextPrimary else LumiColors.TextMuted,
+                    fontSize = 13.sp,
+                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                    maxLines = 1,
+                )
+                Box(
+                    Modifier
+                        .width(16.dp)
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(if (selected) LumiColors.Ivory else Color.Transparent),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TelemetryStrip(telemetry: LiveTelemetry) {
+    val parts = buildList {
+        telemetry.aperture?.let {
+            add(String.format(Locale.ROOT, "f/%.2f", it).trimEnd('0').trimEnd('.'))
+        }
+        telemetry.shutterNs?.let { add(ExposureSolver.formatShutter(it)) }
+        telemetry.iso?.let { add("ISO $it") }
+    }
+    val text = if (parts.isNotEmpty()) parts.joinToString("  |  ") else "AUTO  |  测光就绪"
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 42.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(LumiColors.Hairline),
+        )
+        Text(
+            text = text,
+            color = LumiColors.TextSecondary,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+        )
+        Box(
+            Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(LumiColors.Hairline),
+        )
+    }
+}
+
+@Composable
+private fun TactileShutterButton(
+    enabled: Boolean,
+    ready: Boolean,
+    autoShootProgress: Float,
+    onClick: () -> Unit,
+) {
+    val outerColor = when {
+        !enabled -> LumiColors.Hairline
+        ready -> LumiColors.Emerald
+        else -> LumiColors.TextPrimary
+    }
+    Box(
+        modifier = Modifier
+            .size(74.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "拍照快门" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val ringStroke = 2.4.dp.toPx()
+            val radius = size.minDimension / 2f - ringStroke
+            drawCircle(
+                color = outerColor,
+                radius = radius,
+                center = center,
+                style = Stroke(ringStroke),
+            )
+            if (autoShootProgress > 0f) {
+                drawArc(
+                    color = LumiColors.Ivory,
+                    startAngle = -90f,
+                    sweepAngle = 360f * autoShootProgress.coerceIn(0f, 1f),
+                    useCenter = false,
+                    topLeft = Offset(ringStroke, ringStroke),
+                    size = Size(size.width - ringStroke * 2f, size.height - ringStroke * 2f),
+                    style = Stroke(width = 3.2.dp.toPx(), cap = StrokeCap.Round),
+                )
+            }
+            drawCircle(
+                color = if (enabled) Color.White else Color(0x66FFFFFF),
+                radius = radius - 5.dp.toPx(),
+                center = center,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LastPhotoThumbSlot(review: PostShotReview?, onClick: () -> Unit) {
+    if (review == null) {
+        Box(
+            modifier = Modifier
+                .size(46.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0x16FFFFFF))
+                .border(1.dp, LumiColors.Hairline, RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            ReferenceFrameIcon(tint = LumiColors.TextMuted, size = 18.dp)
+        }
+        return
+    }
+    val context = LocalContext.current
+    val thumb by produceState<android.graphics.Bitmap?>(null, review.photoUri) {
+        value = withContext(Dispatchers.IO) {
+            PostShotRecrop.loadPreviewBitmap(context, review.photoUri, maxEdge = 160)
+        }
+    }
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0x22FFFFFF),
+        border = BorderStroke(1.dp, LumiColors.HairlineStrong),
+        modifier = Modifier
+            .size(46.dp)
+            .semantics { contentDescription = "打开上次成片轻复盘与二次构图" },
+    ) {
+        val bmp = thumb
+        if (bmp != null) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = "上次拍摄缩略图",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("复盘", color = LumiColors.Ivory, fontSize = 10.sp)
+            }
+        }
+    }
+}
+
 @Composable
 private fun DiagnosticDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
@@ -710,24 +1364,37 @@ private fun DiagnosticDialog(onDismiss: () -> Unit) {
         value = file?.let { withContext(Dispatchers.IO) { BitmapFactory.decodeFile(it.absolutePath) } }
     }
     Dialog(onDismissRequest = onDismiss) {
-        Surface(shape = MaterialTheme.shapes.large) {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("上次推荐构图诊断", style = MaterialTheme.typography.titleMedium)
-                Text("黄框/点=模型主体  蓝线=本地边缘  红十字=原中心  绿框/环=建议成片",
-                    fontSize = 11.sp, color = Color(0xFFB0BEC5))
+        Surface(shape = RoundedCornerShape(18.dp), color = LumiColors.SurfaceDark) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("上次推荐构图诊断", style = MaterialTheme.typography.titleMedium, color = LumiColors.TextPrimary)
+                Text(
+                    "黄框/点=模型主体  蓝线=本地边缘  红十字=原中心  绿框/环=建议成片",
+                    fontSize = 11.sp,
+                    color = LumiColors.TextMuted,
+                )
                 if (saved == null) {
-                    Text("暂无推荐诊断记录，请先点击一次「推荐构图」。", fontSize = 13.sp)
+                    Text("暂无推荐诊断记录，请先点击一次「AI 构图」。", fontSize = 13.sp, color = LumiColors.TextSecondary)
                 } else {
                     bitmap?.let { bmp ->
-                        Image(bmp.asImageBitmap(), contentDescription = "推荐构图叠加诊断图",
-                            modifier = Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat() / bmp.height.toFloat()),
-                            contentScale = ContentScale.Fit)
+                        Image(
+                            bmp.asImageBitmap(),
+                            contentDescription = "推荐构图叠加诊断图",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(bmp.width.toFloat() / bmp.height.toFloat()),
+                            contentScale = ContentScale.Fit,
+                        )
                     }
-                    Text(saved?.report.orEmpty(), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    Text(saved?.report.orEmpty(), fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = LumiColors.TextSecondary)
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onDismiss) { Text("关闭") }
+                    TextButton(onDismiss) { Text("关闭", color = LumiColors.Ivory) }
                 }
             }
         }
@@ -738,21 +1405,19 @@ private fun DrawScope.drawHorizonLevel(mid: Offset, rollDeg: Double) {
     if (abs(rollDeg) > 35.0) return
     val level = abs(rollDeg) <= PoseGuidance.LEVEL_GREEN_DEG
     val color = when {
-        level -> Color(0xFF38DF85)
+        level -> LumiColors.Emerald
         abs(rollDeg) <= 5.0 -> Color.White.copy(alpha = 0.78f)
-        else -> Color(0xFFFFC107).copy(alpha = 0.88f)
+        else -> LumiColors.Amber.copy(alpha = 0.88f)
     }
-    val stroke = 1.6.dp.toPx()
-    val refStroke = 1.2.dp.toPx()
+    val stroke = 1.5.dp.toPx()
+    val refStroke = 1.dp.toPx()
     val innerGap = 11.dp.toPx()
     val armLen = 16.dp.toPx()
     val refGap = innerGap + armLen + 4.dp.toPx()
     val refLen = 6.dp.toPx()
-    val refColor = if (level) Color(0xFF38DF85).copy(alpha = 0.65f) else Color.White.copy(alpha = 0.35f)
-    // Fixed horizontal reference ticks on outer left and right.
+    val refColor = if (level) LumiColors.Emerald.copy(alpha = 0.65f) else Color.White.copy(alpha = 0.30f)
     drawLine(refColor, Offset(mid.x - refGap - refLen, mid.y), Offset(mid.x - refGap, mid.y), refStroke, cap = StrokeCap.Round)
     drawLine(refColor, Offset(mid.x + refGap, mid.y), Offset(mid.x + refGap + refLen, mid.y), refStroke, cap = StrokeCap.Round)
-    // Tilted horizon bar matching real-world horizontal plane.
     val rad = if (level) 0.0 else Math.toRadians(rollDeg)
     val cx = cos(rad).toFloat()
     val sy = sin(rad).toFloat()
@@ -776,43 +1441,47 @@ private fun DrawScope.drawCandidateBrackets(candidates: List<CandidateOverlay>) 
     if (candidates.isEmpty()) return
     val stroke = 1.8.dp.toPx()
     for (c in candidates) {
-        val color = if (c.userPicked) Color(0xFFFFD54F) else Color(0xAA4FC3F7)
+        val color = if (c.userPicked) LumiColors.Ivory else LumiColors.Emerald.copy(alpha = 0.78f)
         val w = c.right - c.left
         val h = c.bottom - c.top
         val corner = minOf(14.dp.toPx(), w * 0.25f, h * 0.25f)
-        // Top-left
         drawLine(color, Offset(c.left, c.top), Offset(c.left + corner, c.top), stroke, cap = StrokeCap.Round)
         drawLine(color, Offset(c.left, c.top), Offset(c.left, c.top + corner), stroke, cap = StrokeCap.Round)
-        // Top-right
         drawLine(color, Offset(c.right, c.top), Offset(c.right - corner, c.top), stroke, cap = StrokeCap.Round)
         drawLine(color, Offset(c.right, c.top), Offset(c.right, c.top + corner), stroke, cap = StrokeCap.Round)
-        // Bottom-left
         drawLine(color, Offset(c.left, c.bottom), Offset(c.left + corner, c.bottom), stroke, cap = StrokeCap.Round)
         drawLine(color, Offset(c.left, c.bottom), Offset(c.left, c.bottom - corner), stroke, cap = StrokeCap.Round)
-        // Bottom-right
         drawLine(color, Offset(c.right, c.bottom), Offset(c.right - corner, c.bottom), stroke, cap = StrokeCap.Round)
         drawLine(color, Offset(c.right, c.bottom), Offset(c.right, c.bottom - corner), stroke, cap = StrokeCap.Round)
     }
 }
 
 private fun DrawScope.drawTapReticle(tap: Point) {
-    val color = Color(0xFFFFD54F)
+    val color = LumiColors.Ivory
     val radius = 18.dp.toPx()
-    val stroke = 1.8.dp.toPx()
+    val stroke = 1.6.dp.toPx()
     val center = Offset(tap.x, tap.y)
     drawCircle(color, radius, center, style = Stroke(stroke))
-    drawCircle(color, 3.dp.toPx(), center)
+    drawCircle(color, 2.8.dp.toPx(), center)
 }
 
-private fun DrawScope.drawCompositionGuides(selection: PresetSelection) {
+private fun DrawScope.drawCompositionGuides(selection: PresetSelection, showBaseGrid: Boolean) {
     val w = size.width
     val h = size.height
-    val lineColor = Color.White.copy(alpha = 0.26f)
-    val accentColor = Color(0xFFB3DBBE).copy(alpha = 0.55f)
-    val stroke = 1.dp.toPx()
+    val baseGridColor = Color.White.copy(alpha = 0.16f)
+    val lineColor = Color.White.copy(alpha = 0.24f)
+    val accentColor = LumiColors.Ivory.copy(alpha = 0.62f)
+    val stroke = 0.85.dp.toPx()
     val dash = PathEffect.dashPathEffect(floatArrayOf(8.dp.toPx(), 6.dp.toPx()))
     when (selection.preset) {
-        CompositionPreset.AUTO -> Unit
+        CompositionPreset.AUTO -> {
+            if (showBaseGrid) {
+                drawLine(baseGridColor, Offset(w / 3f, 0f), Offset(w / 3f, h), stroke)
+                drawLine(baseGridColor, Offset(w * 2f / 3f, 0f), Offset(w * 2f / 3f, h), stroke)
+                drawLine(baseGridColor, Offset(0f, h / 3f), Offset(w, h / 3f), stroke)
+                drawLine(baseGridColor, Offset(0f, h * 2f / 3f), Offset(w, h * 2f / 3f), stroke)
+            }
+        }
         CompositionPreset.RULE_OF_THIRDS -> {
             val leftColor = if (selection.activeThirdSide == CompositionChoice.LEFT_THIRD) accentColor else lineColor
             val rightColor = if (selection.activeThirdSide == CompositionChoice.RIGHT_THIRD) accentColor else lineColor
@@ -835,149 +1504,12 @@ private fun DrawScope.drawCompositionGuides(selection: PresetSelection) {
 }
 
 @Composable
-private fun PresetPillBar(selection: PresetSelection, onSelect: (CompositionPreset) -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CompositionPreset.entries.forEach { preset ->
-            val selected = selection.preset == preset
-            val text = when {
-                preset == CompositionPreset.RULE_OF_THIRDS && selected ->
-                    if (selection.thirdChoice == CompositionChoice.LEFT_THIRD) "三分·左" else "三分·右"
-                else -> preset.label
-            }
-            val bg = if (selected) Color(0xFFB3DBBE) else Color(0x2EFFFFFF)
-            val fg = if (selected) Color(0xFF102016) else Color(0xFFE0E5E2)
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(bg)
-                    .clickable(role = Role.RadioButton) { onSelect(preset) }
-                    .padding(horizontal = 12.dp, vertical = 5.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(text, color = fg, fontSize = 12.sp, maxLines = 1)
-            }
-        }
-    }
-}
-
-@Composable
-private fun CameraFlipButton(front: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    val tint = if (enabled) Color(0xFFB3DBBE) else Color(0x55B3DBBE)
-    val border = if (enabled) Color(0xFF5A6560) else Color(0x335A6560)
-    Surface(
-        onClick = onClick,
-        enabled = enabled,
-        shape = CircleShape,
-        color = Color.Transparent,
-        border = BorderStroke(1.dp, border),
-        modifier = Modifier
-            .size(40.dp)
-            .semantics { contentDescription = if (front) "切换到后置摄像头" else "切换到前置摄像头" },
-    ) {
-        Canvas(Modifier.fillMaxSize().padding(9.dp)) {
-            val w = size.width
-            val h = size.height
-            val strokeWidth = 1.9.dp.toPx()
-            val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            val inset = strokeWidth * 0.6f
-            val arcSize = Size(w - inset * 2f, h - inset * 2f)
-            val topLeft = Offset(inset, inset)
-            // Top-right arc + arrowhead
-            drawArc(tint, startAngle = -145f, sweepAngle = 125f, useCenter = false, topLeft = topLeft, size = arcSize, style = stroke)
-            val topArrow = Path().apply {
-                moveTo(w * 0.72f, h * 0.24f)
-                lineTo(w * 0.92f, h * 0.34f)
-                lineTo(w * 0.87f, h * 0.12f)
-            }
-            drawPath(topArrow, tint, style = stroke)
-            // Bottom-left arc + arrowhead
-            drawArc(tint, startAngle = 35f, sweepAngle = 125f, useCenter = false, topLeft = topLeft, size = arcSize, style = stroke)
-            val bottomArrow = Path().apply {
-                moveTo(w * 0.28f, h * 0.76f)
-                lineTo(w * 0.08f, h * 0.66f)
-                lineTo(w * 0.13f, h * 0.88f)
-            }
-            drawPath(bottomArrow, tint, style = stroke)
-        }
-    }
-}
-
-@Composable
-private fun DirectorCuePill(cue: DirectorCue) {
-    val accent = when (cue.category) {
-        DirectorCategory.LIGHTING -> Color(0xFFFFD54F)
-        DirectorCategory.POSE -> Color(0xFFFFAB91)
-        DirectorCategory.BACKGROUND -> Color(0xFF81D4FA)
-        DirectorCategory.FRAMING -> Color(0xFFB3DBBE)
-    }
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = Color(0xBF141917),
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.72f)),
-    ) {
-        Row(
-            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(accent.copy(alpha = 0.22f))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            ) {
-                Text(cue.category.badge, color = accent, fontSize = 11.sp, maxLines = 1)
-            }
-            Text(cue.tip, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-    }
-}
-
-@Composable
-private fun LastPhotoThumb(review: PostShotReview, onClick: () -> Unit) {
-    val context = LocalContext.current
-    val thumb by produceState<android.graphics.Bitmap?>(null, review.photoUri) {
-        value = withContext(Dispatchers.IO) { PostShotRecrop.loadPreviewBitmap(context, review.photoUri, maxEdge = 160) }
-    }
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(10.dp),
-        color = Color(0x33FFFFFF),
-        border = BorderStroke(1.dp, Color(0xFFB3DBBE)),
-        modifier = Modifier
-            .size(40.dp)
-            .semantics { contentDescription = "打开上次成片轻复盘与二次构图" },
-    ) {
-        val bmp = thumb
-        if (bmp != null) {
-            Image(
-                bitmap = bmp.asImageBitmap(),
-                contentDescription = "上次拍摄缩略图",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("复盘", color = Color(0xFFB3DBBE), fontSize = 10.sp)
-            }
-        }
-    }
-}
-
-@Composable
 private fun StepProgressPill(step: StepProgress) {
-    val accent = if (step.satisfied) Color(0xFF38DF85) else Color(0xFF4FC3F7)
+    val accent = if (step.satisfied) LumiColors.Emerald else LumiColors.Ivory
     Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = Color(0xC7111A1E),
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.80f)),
+        shape = RoundedCornerShape(18.dp),
+        color = LumiColors.GlassDark,
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.72f)),
     ) {
         Column(
             Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -987,15 +1519,15 @@ private fun StepProgressPill(step: StepProgress) {
             Text(
                 text = if (step.satisfied) "✓ 机位已到位" else "${step.direction.arrow} ${step.direction.label}",
                 color = accent,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 maxLines = 1,
             )
             Box(
                 Modifier
                     .width(96.dp)
-                    .height(4.dp)
+                    .height(3.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(Color(0x33FFFFFF)),
+                    .background(Color(0x28FFFFFF)),
             ) {
                 Box(
                     Modifier
@@ -1012,14 +1544,14 @@ private fun StepProgressPill(step: StepProgress) {
 @Composable
 private fun QualityScoreCard(score: PhotoQualityScore) {
     val gradeColor = when (score.grade) {
-        "S" -> Color(0xFF38DF85)
-        "A" -> Color(0xFFB3DBBE)
-        "B" -> Color(0xFFFFD54F)
+        "S" -> LumiColors.Emerald
+        "A" -> LumiColors.Ivory
+        "B" -> LumiColors.Amber
         else -> Color(0xFFFFAB91)
     }
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = Color(0x1FFFFFFF),
+        color = Color(0x14FFFFFF),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
@@ -1031,7 +1563,7 @@ private fun QualityScoreCard(score: PhotoQualityScore) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("成片四维评估", color = Color.White, fontSize = 13.sp)
+                Text("成片四维评估", color = LumiColors.TextPrimary, fontSize = 13.sp)
                 Text(
                     text = "${score.overall} 分 · ${score.grade} 级（待提升：${score.weakestDimension}）",
                     color = gradeColor,
@@ -1050,23 +1582,23 @@ private fun QualityScoreCard(score: PhotoQualityScore) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(label, color = Color(0xFFB8C5BE), fontSize = 11.sp, modifier = Modifier.width(52.dp))
+                    Text(label, color = LumiColors.TextMuted, fontSize = 11.sp, modifier = Modifier.width(52.dp))
                     Box(
                         Modifier
                             .weight(1f)
-                            .height(5.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(Color(0x28FFFFFF)),
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(Color(0x24FFFFFF)),
                     ) {
                         Box(
                             Modifier
                                 .fillMaxHeight()
                                 .fillMaxWidth((value / 100f).coerceIn(0.05f, 1f))
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(if (value >= 80) Color(0xFF38DF85) else Color(0xFFFFD54F)),
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(if (value >= 80) LumiColors.Emerald else LumiColors.Ivory),
                         )
                     }
-                    Text("$value", color = Color.White, fontSize = 11.sp, modifier = Modifier.width(24.dp))
+                    Text("$value", color = LumiColors.TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.width(24.dp))
                 }
             }
         }
@@ -1093,7 +1625,11 @@ private fun PostShotReviewDialog(
     val activeCrop: NormalizedCrop? = activeProposal?.crop
 
     Dialog(onDismissRequest = onDismiss) {
-        Surface(shape = MaterialTheme.shapes.large) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = LumiColors.SurfaceDark,
+            border = BorderStroke(1.dp, LumiColors.Hairline),
+        ) {
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -1101,8 +1637,8 @@ private fun PostShotReviewDialog(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Text("拍后轻复盘 · 二次构图", style = MaterialTheme.typography.titleMedium)
-                Text(review.summary, fontSize = 13.sp, color = Color(0xFFD5E0DA))
+                Text("拍后轻复盘 · 二次构图", style = MaterialTheme.typography.titleMedium, color = LumiColors.TextPrimary)
+                Text(review.summary, fontSize = 13.sp, color = LumiColors.TextSecondary)
                 review.qualityScore?.let { QualityScoreCard(it) }
                 val bmp = previewBitmap
                 if (bmp != null) {
@@ -1119,7 +1655,7 @@ private fun PostShotReviewDialog(
                         Modifier
                             .fillMaxWidth()
                             .aspectRatio(displayBmp.width.toFloat() / displayBmp.height.toFloat())
-                            .clip(RoundedCornerShape(10.dp))
+                            .clip(RoundedCornerShape(12.dp))
                             .background(Color.Black),
                     ) {
                         Image(
@@ -1134,11 +1670,11 @@ private fun PostShotReviewDialog(
                         Modifier
                             .fillMaxWidth()
                             .height(220.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFF141816)),
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(LumiColors.Obsidian),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("正在加载照片…", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+                        Text("正在加载照片…", color = LumiColors.TextMuted, fontSize = 13.sp)
                     }
                 }
                 Row(
@@ -1161,7 +1697,7 @@ private fun PostShotReviewDialog(
                     }
                 }
                 activeProposal?.let {
-                    Text(it.subtitle, fontSize = 12.sp, color = Color(0xFFB3DBBE))
+                    Text(it.subtitle, fontSize = 12.sp, color = LumiColors.Ivory)
                 }
                 Row(
                     Modifier.fillMaxWidth(),
@@ -1170,7 +1706,7 @@ private fun PostShotReviewDialog(
                 ) {
                     Text(
                         text = prefText,
-                        color = Color(0xFF9EB0A6),
+                        color = LumiColors.TextMuted,
                         fontSize = 11.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1183,7 +1719,7 @@ private fun PostShotReviewDialog(
                         },
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                     ) {
-                        Text("重置偏好", fontSize = 11.sp)
+                        Text("重置偏好", fontSize = 11.sp, color = LumiColors.Ivory)
                     }
                 }
                 Row(
@@ -1191,7 +1727,7 @@ private fun PostShotReviewDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TextButton(onClick = onDismiss, enabled = !saving) { Text("关闭") }
+                    TextButton(onClick = onDismiss, enabled = !saving) { Text("关闭", color = LumiColors.TextSecondary) }
                     if (activeProposal != null) {
                         Button(
                             enabled = !saving,

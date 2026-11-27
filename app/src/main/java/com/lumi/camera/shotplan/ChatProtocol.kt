@@ -3,6 +3,7 @@ package com.lumi.camera.shotplan
 import android.util.Base64
 import android.util.JsonReader
 import android.util.JsonToken
+import com.lumi.camera.filter.FilterPreset
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.StringReader
@@ -34,6 +35,8 @@ internal object ChatProtocol {
         requestExposureAdvice: Boolean = false,
         referenceRecipe: ReferenceRecipe? = null,
         hasReferenceImage: Boolean = false,
+        requestFilterAdvice: Boolean = false,
+        activeFilterPreset: FilterPreset? = null,
     ): String {
         val zoomHint = if (zoomStops.size >= 2) {
             val stopsText = zoomStops.joinToString("/") { String.format(Locale.ROOT, "%.1f", it).removeSuffix(".0") }
@@ -44,6 +47,16 @@ internal object ChatProtocol {
         }
         val exposureHint = if (requestExposureAdvice) {
             "请结合现场实时测光与画面天气/顺逆光/光比，给出可选 \"exposure\":{\"ev\":-0.7,\"wb\":5600,\"reason\":\"逆光压高光\"}（ev 为 -2.5~2.5 曝光补偿；如需防手抖或特定暗光控制可填 shutter_ms 或 iso；wb 为 2800~7500 色温K；当前曝光已很准时可省略 exposure）。"
+        } else {
+            ""
+        }
+        val filterHint = if (requestFilterAdvice) {
+            val presetIds = FilterPreset.aiEligibleIds.joinToString("|")
+            if (activeFilterPreset != null && activeFilterPreset != FilterPreset.ORIGINAL) {
+                "当前用户选用滤镜 \"${activeFilterPreset.id}\"(${activeFilterPreset.displayName})，请结合画面天气与环境光给出实时参数微调 \"filter\":{\"preset\":\"${activeFilterPreset.id}\",\"delta\":{\"temp\":-0.05,\"shadows\":0.10,\"highlights\":-0.08,\"glow\":0.05},\"reason\":\"阴天柔光提通透\"}（delta 各项均为 -0.15~0.15 小幅微调，reason 不超过 12 字）。"
+            } else {
+                "请结合画面天气与周围环境氛围（晴天氧气、阴雨小清新、日落暖阳、胶片街拍、夜景霓虹、室内奶油人像、强光影黑白、复古CCD、清冷胶片），在 JSON 中附加 \"filter\":{\"preset\":\"$presetIds\" 选其一,\"delta\":{\"temp\":-0.05,\"shadows\":0.10,\"highlights\":-0.08,\"glow\":0.05},\"reason\":\"晴日清透柔高光\"}（delta 各项均为 -0.15~0.15 小幅微调，reason 不超过 12 字）。"
+            }
         } else {
             ""
         }
@@ -85,6 +98,7 @@ internal object ChatProtocol {
                 if (zoomHint.isNotEmpty()) append(zoomHint)
                 if (!telemetrySummary.isNullOrBlank()) append(telemetrySummary)
                 if (exposureHint.isNotEmpty()) append(exposureHint)
+                if (filterHint.isNotEmpty()) append(filterHint)
                 if (referenceHint.isNotEmpty()) append(referenceHint)
                 if (!preferencePrior.isNullOrBlank()) append(preferencePrior)
                 append("reason 十字以内写画面效果，不写左右上下移动指令。")
@@ -94,6 +108,7 @@ internal object ChatProtocol {
             if (zoomHint.isNotEmpty()) parts += zoomHint
             if (!telemetrySummary.isNullOrBlank()) parts += telemetrySummary
             if (exposureHint.isNotEmpty()) parts += exposureHint
+            if (filterHint.isNotEmpty()) parts += filterHint
             if (referenceHint.isNotEmpty()) parts += referenceHint
             if (!preferencePrior.isNullOrBlank()) parts += preferencePrior
             parts.joinToString("\n")
@@ -114,6 +129,8 @@ internal object ChatProtocol {
         requestExposureAdvice: Boolean = false,
         referenceRecipe: ReferenceRecipe? = null,
         referenceJpeg: ByteArray? = null,
+        requestFilterAdvice: Boolean = false,
+        activeFilterPreset: FilterPreset? = null,
     ): ByteArray {
         val liveUrl = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
         val hasRefImg = referenceJpeg != null && referenceJpeg.isNotEmpty()
@@ -128,6 +145,8 @@ internal object ChatProtocol {
                 requestExposureAdvice = requestExposureAdvice,
                 referenceRecipe = referenceRecipe,
                 hasReferenceImage = hasRefImg,
+                requestFilterAdvice = requestFilterAdvice,
+                activeFilterPreset = activeFilterPreset,
             )))
         if (hasRefImg) {
             val refUrl = "data:image/jpeg;base64," + Base64.encodeToString(referenceJpeg, Base64.NO_WRAP)
@@ -141,7 +160,8 @@ internal object ChatProtocol {
         if (disablesReasoning(model)) {
             val maxTokens = when {
                 candidates.isEmpty() -> 1280
-                hasRefImg || referenceRecipe != null -> 400
+                hasRefImg || referenceRecipe != null -> 440
+                requestFilterAdvice || requestExposureAdvice -> 320
                 else -> 256
             }
             body.put("reasoning_effort", "none").put("max_tokens", maxTokens)

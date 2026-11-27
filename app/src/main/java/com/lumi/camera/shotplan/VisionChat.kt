@@ -2,6 +2,7 @@ package com.lumi.camera.shotplan
 
 import android.os.SystemClock
 import com.lumi.camera.BuildConfig
+import com.lumi.camera.filter.FilterPreset
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.Proxy
@@ -38,11 +39,14 @@ internal class VisionChat(private val config: ModelConfig, private val deadlineN
         requestExposureAdvice: Boolean = false,
         referenceRecipe: ReferenceRecipe? = null,
         referenceJpeg: ByteArray? = null,
+        requestFilterAdvice: Boolean = false,
+        activeFilterPreset: FilterPreset? = null,
     ): ModelReply {
         remainingMs()
         val payload = ChatProtocol.request(
             config.model, jpeg, preset, candidates, zoomStops, currentZoom,
             preferencePrior, telemetrySummary, requestExposureAdvice, referenceRecipe, referenceJpeg,
+            requestFilterAdvice, activeFilterPreset,
         )
         val body = postJson(payload)
         return try { ChatProtocol.response(body, candidates, zoomStops, currentZoom) } catch (_: Exception) { null }

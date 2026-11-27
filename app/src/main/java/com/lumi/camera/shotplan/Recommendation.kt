@@ -1,5 +1,6 @@
 package com.lumi.camera.shotplan
 
+import com.lumi.camera.filter.AiFilterSuggestion
 import com.lumi.camera.guidance.Observation
 import com.lumi.camera.guidance.RotationProjection
 import com.lumi.camera.guidance.StepDirection
@@ -37,11 +38,12 @@ internal class Recommendation private constructor(
     val stepDirection: StepDirection? = null,
     val exposureSuggestion: AiExposureSuggestion? = null,
     val referenceGuidance: ReferenceGuidance? = null,
+    val filterSuggestion: AiFilterSuggestion? = null,
 ) {
     fun withMeasuredBounds(bounds: FaceBox): Recommendation {
         val selectedChoice = choice ?: return this
         val computed = CompositionChoice.aimPointFor(bounds, selectedChoice)
-        return Recommendation(computed, confidence, computed == Uv.CENTER, reason, subject, selectedChoice, suggestedZoom, candidateId, directorCue, stepDirection, exposureSuggestion, referenceGuidance)
+        return Recommendation(computed, confidence, computed == Uv.CENTER, reason, subject, selectedChoice, suggestedZoom, candidateId, directorCue, stepDirection, exposureSuggestion, referenceGuidance, filterSuggestion)
     }
 
     val caption: String = run {
@@ -68,8 +70,8 @@ internal class Recommendation private constructor(
         private val jsonToken = java.util.regex.Pattern.compile(
             """[ \t\r\n]+|[{}\[\],:]|true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|(?:"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")""")
 
-        private val candidateAllowedKeys = setOf("candidate", "choice", "reason", "name", "zoom", "confidence", "focus", "tip", "step", "exposure", "pose_cue", "beyond_tip")
-        private val choiceAllowedKeys = setOf("subject", "choice", "confidence", "reason", "zoom", "focus", "tip", "step", "exposure", "pose_cue", "beyond_tip")
+        private val candidateAllowedKeys = setOf("candidate", "choice", "reason", "name", "zoom", "confidence", "focus", "tip", "step", "exposure", "pose_cue", "beyond_tip", "filter")
+        private val choiceAllowedKeys = setOf("subject", "choice", "confidence", "reason", "zoom", "focus", "tip", "step", "exposure", "pose_cue", "beyond_tip", "filter")
 
         fun hasJsonTokens(text: String): Boolean {
             if (text.length > 8192 || !text.trimStart().startsWith('{')) return false
@@ -117,10 +119,11 @@ internal class Recommendation private constructor(
             val stepDirection = StepDirection.parse(fields["step"])
             val exposureSuggestion = AiExposureSuggestion.parse(fields["exposure"])
             val referenceGuidance = ReferenceGuidance.parse(fields["pose_cue"], fields["beyond_tip"])
+            val filterSuggestion = AiFilterSuggestion.parse(fields["filter"])
             val subject = picked.toSelectedSubject(nameOverride)
             val aim = CompositionChoice.aimPointFor(subject.bounds, choice)
             return PlanResult.Accepted(
-                Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, candidateId = id, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion, referenceGuidance = referenceGuidance)
+                Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, candidateId = id, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion, referenceGuidance = referenceGuidance, filterSuggestion = filterSuggestion)
             )
         }
 
@@ -144,9 +147,10 @@ internal class Recommendation private constructor(
                 val stepDirection = StepDirection.parse(fields["step"])
                 val exposureSuggestion = AiExposureSuggestion.parse(fields["exposure"])
                 val referenceGuidance = ReferenceGuidance.parse(fields["pose_cue"], fields["beyond_tip"])
+                val filterSuggestion = AiFilterSuggestion.parse(fields["filter"])
                 val aim = CompositionChoice.aimPointFor(subject.bounds, choice)
                 return PlanResult.Accepted(
-                    Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion, referenceGuidance = referenceGuidance)
+                    Recommendation(aim, confidence, aim == Uv.CENTER, reason, subject, choice, suggestedZoom, directorCue = directorCue, stepDirection = stepDirection, exposureSuggestion = exposureSuggestion, referenceGuidance = referenceGuidance, filterSuggestion = filterSuggestion)
                 )
             }
             if (fields.keys != setOf("aimPoint", "confidence", "alreadyGood", "reason", "subject")) return malformed
